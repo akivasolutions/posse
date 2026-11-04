@@ -328,3 +328,12 @@ textarea.mem { width: 100%; min-height: 140px; border: 1px solid var(--line-stro
 .meter i { display: block; height: 100%; background: var(--accent); }
 .msg.flash { background: color-mix(in srgb, var(--warn) 14%, var(--bg)); }
 .msg.system .btn { margin-left: 8px; }
+
+/* sign-in */
+.signin { min-height: 100vh; display: grid; place-items: center; background: var(--side); padding: 16px; }
+.signin form { background: var(--bg); padding: 28px; border-radius: 14px; box-shadow: var(--shadow); width: min(400px, 100%); display: flex; flex-direction: column; gap: 12px; }
+.signin .brand { font-size: 17px; }
+.signin p { margin: 0; color: var(--text-2); font-size: 13.5px; }
+.signin .err { color: var(--bad); }
+.signin input { border: 1px solid var(--line-strong); border-radius: 8px; padding: 9px 11px; background: var(--bg); }
+.signin .btn { justify-content: center; padding: 9px; }

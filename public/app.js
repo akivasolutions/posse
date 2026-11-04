@@ -37,12 +37,56 @@
   const COLORS = ['#4f6bed', '#0e9f6e', '#d97706', '#db2777', '#7c3aed', '#0891b2', '#dc2626', '#65a30d', '#475569'];
   const DAYN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+  // ---------------- access key ----------------
+  // The key lives in this origin's localStorage (other ports on 127.0.0.1 can't read it) and goes
+  // out as a header. Links the browser loads on its own carry a read-only view token instead.
+  const KEY_STORE = 'bullpen.key';
+  let KEY = '';
+  let VT = '';
+  try { KEY = localStorage.getItem(KEY_STORE) || ''; } catch {}
+  {
+    const m = /(?:^#|&)key=([^&]+)/.exec(location.hash);
+    if (m) {
+      KEY = decodeURIComponent(m[1]);
+      try { localStorage.setItem(KEY_STORE, KEY); } catch {}
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  }
+  // Pasting a sign-in link into a tab that's already open only changes the #fragment, which
+  // doesn't reload the page; pick the key up and start over.
+  window.addEventListener('hashchange', () => {
+    const m = /(?:^#|&)key=([^&]+)/.exec(location.hash);
+    if (!m) return;
+    try { localStorage.setItem(KEY_STORE, decodeURIComponent(m[1])); } catch {}
+    history.replaceState(null, '', location.pathname + location.search);
+    location.reload();
+  });
+  const authH = () => ({ Authorization: 'Bearer ' + KEY, 'X-Bullpen': '1' });
+  const vt = (url) => url + (url.includes('?') ? '&' : '?') + 'vt=' + encodeURIComponent(VT);
+
+  function signIn(msg) {
+    if (V.sse) { V.sse.close(); V.sse = null; }
+    document.body.innerHTML = '<div class="signin"><form id="signin"><div class="brand"><span class="brand-mark">B</span>Bullpen</div>' +
+      '<p>Enter your access key. It\'s printed in the window where Bullpen is running and saved in <code>secret.json</code> in its data folder.</p>' +
+      (msg ? '<p class="err">' + esc(msg) + '</p>' : '') +
+      '<input type="password" id="signin-key" autocomplete="current-password" placeholder="Access key" autofocus><button class="btn primary">Sign in</button></form></div>';
+    document.getElementById('signin').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const k = document.getElementById('signin-key').value.trim();
+      const r = await fetch('/api/whoami', { headers: { Authorization: 'Bearer ' + k } }).catch(() => null);
+      if (!r || !r.ok) return signIn('That key didn\'t work.');
+      KEY = k;
+      try { localStorage.setItem(KEY_STORE, KEY); } catch {}
+      location.reload();
+    });
+  }
+
   // ---------------- API ----------------
   async function api(method, url, body) {
-    const opts = { method, headers: { 'X-Bullpen': '1' } };
+    const opts = { method, headers: authH() };
     if (body !== undefined) { opts.headers['content-type'] = 'application/json'; opts.body = JSON.stringify(body); }
     const r = await fetch(url, opts);
-    if (r.status === 401) { location.href = '/login'; throw new Error('Sign in required'); }
+    if (r.status === 401) { try { localStorage.removeItem(KEY_STORE); } catch {} signIn('Please sign in again.'); throw new Error('Sign in required'); }
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
     return data;
@@ -133,7 +177,10 @@
     return p ? 'dm:' + p.id : 'view:library';
   }
   const isChat = (ch) => ch && (ch.startsWith('dm:') || ch.startsWith('room:'));
-  window.addEventListener('popstate', () => { V.ch = fromHash(); renderSide(); renderMain(); renderPane(); });
+  window.addEventListener('popstate', () => {
+    if (!$('#side') || /key=/.test(location.hash)) return; // sign-in screen, or a sign-in link being handled
+    V.ch = fromHash(); renderSide(); renderMain(); renderPane();
+  });
 
   // ---------------- sidebar ----------------
   function sectionOrder() {
@@ -383,7 +430,7 @@
     let body = '';
     if (m.kind === 'card') body = cardHTML(m);
     else body = '<div class="body md">' + md(m.text) + '</div>';
-    if (m.files && m.files.length) body += '<div class="files">' + m.files.map((f) => '<a class="chip" href="/files/' + esc(f.id) + '/' + encodeURIComponent(f.name) + '" target="_blank">📎 ' + esc(f.name) + ' <small>' + fmtSize(f.size || 0) + '</small></a>').join('') + '</div>';
+    if (m.files && m.files.length) body += '<div class="files">' + m.files.map((f) => '<a class="chip" href="' + esc(vt('/files/' + f.id + '/' + encodeURIComponent(f.name))) + '" target="_blank">📎 ' + esc(f.name) + ' <small>' + fmtSize(f.size || 0) + '</small></a>').join('') + '</div>';
     if (m.reactions && m.reactions.length) body += '<div class="reactions">' + m.reactions.map((r) => { const b = botById(r.botId); return '<span title="' + esc(b ? b.name : '') + '">' + esc(r.emoji) + '</span>'; }).join('') + '</div>';
     if (meta.steps && meta.steps.length) {
       body += '<details class="steps"><summary>' + meta.steps.length + ' step' + (meta.steps.length === 1 ? '' : 's') + (meta.ms ? ' · ' + Math.max(1, Math.round(meta.ms / 1000)) + 's' : '') +
@@ -411,10 +458,12 @@
         const input = Object.entries(c.input || {}).map(([k, v]) => k + ': ' + v).join('\n');
         let h = '<div class="card approval"><h4>' + (c.escalation ? '🛡 ' + esc(c.tool) + '?' : '⚠️ Approve ' + esc(c.tool) + '?') + '</h4>' +
           (c.escalation ? '<div class="k">That bot has more permissions than the one asking. Approve only if this is what you want done.</div>' : '') + '<pre class="input">' + esc(input) + '</pre>';
-        if (st === 'pending') {
+        if (st === 'pending' || st === 'later') {
+          if (st === 'later') h += '<div class="k" style="margin-bottom:4px">The bot moved on while waiting. Answer any time: approving gives it a new turn to do this.</div>';
           h += '<div class="row-actions"><button class="btn sm primary" data-act="ap" data-d="allow">Allow once</button>' +
             (c.rule ? '<button class="btn sm" data-act="ap" data-d="always" title="Adds the rule ' + esc(c.rule) + ' to this bot">Always allow ' + esc(ruleScope(c.rule)) + '</button>' : '') +
-            '<button class="btn sm danger" data-act="ap" data-d="deny">Deny</button></div>';
+            '<button class="btn sm danger" data-act="ap" data-d="deny">Deny</button></div>' +
+            (c.rule ? '<div class="k" style="margin-top:6px">Always allow adds the rule <code>' + esc(c.rule) + '</code> to this bot.</div>' : '');
         } else {
           const label = { allowed: ['ok', 'Allowed'], always: ['ok', 'Always allowed'], denied: ['bad', 'Denied' + (c.note ? ' — ' + c.note : '')], expired: ['bad', 'Expired'] }[st] || ['', st];
           h += '<div class="row-actions"><span class="state ' + label[0] + '">' + esc(label[1]) + '</span></div>';
@@ -431,12 +480,12 @@
       case 'page': {
         const p = S.pages.find((x) => x.id === c.pageId);
         return '<div class="card"><h4>▤ ' + esc(p ? p.title : c.title) + '</h4><div class="k">' + (p ? (c.updated ? 'Page updated' : 'Saved to your Library') : 'This page was deleted') + '</div>' +
-          (p ? '<div class="row-actions"><button class="btn sm primary" data-act="open-page" data-id="' + esc(c.pageId) + '">Open</button><a class="btn sm" target="_blank" href="/pages/' + esc(c.pageId) + '">New tab ↗</a></div>' : '') + '</div>';
+          (p ? '<div class="row-actions"><button class="btn sm primary" data-act="open-page" data-id="' + esc(c.pageId) + '">Open</button><a class="btn sm" target="_blank" href="' + esc(vt('/pages/' + c.pageId)) + '">New tab ↗</a></div>' : '') + '</div>';
       }
       case 'file':
         return '<div class="card"><h4>📎 ' + esc(c.name) + '</h4><div class="k">' + fmtSize(c.size || 0) + (c.caption ? ' · ' + esc(c.caption) : '') + '</div>' +
-          '<div class="row-actions"><a class="btn sm primary" target="_blank" href="/files/' + esc(c.fileId) + '/' + encodeURIComponent(c.name) + '">Open</a>' +
-          '<a class="btn sm" href="/files/' + esc(c.fileId) + '/' + encodeURIComponent(c.name) + '?download=1">Download</a></div></div>';
+          '<div class="row-actions"><a class="btn sm primary" target="_blank" href="' + esc(vt('/files/' + c.fileId + '/' + encodeURIComponent(c.name))) + '">Open</a>' +
+          '<a class="btn sm" href="' + esc(vt('/files/' + c.fileId + '/' + encodeURIComponent(c.name) + '?download=1')) + '">Download</a></div></div>';
       case 'task': {
         const t = taskById(c.taskId);
         if (!t) return '<div class="card task"><span>☑</span><div class="tt"><b>Task #' + esc(c.taskId) + '</b></div></div>';
@@ -578,7 +627,7 @@
 
   async function upload(file) {
     if (file.size > 200 * 1024 * 1024) { toast(file.name + ' is over 200 MB', true); return; }
-    const r = await fetch('/api/upload', { method: 'POST', headers: { 'X-Bullpen': '1', 'X-Filename': encodeURIComponent(file.name) }, body: file }).then((x) => x.json()).catch(() => null);
+    const r = await fetch('/api/upload', { method: 'POST', headers: { ...authH(), 'X-Filename': encodeURIComponent(file.name) }, body: file }).then((x) => x.json()).catch(() => null);
     if (!r || !r.id) { toast('Upload failed: ' + file.name, true); return; }
     V.pending.push(r);
     renderPending();
@@ -663,10 +712,10 @@
     if (V.pane.startsWith('page:')) {
       const p = S.pages.find((x) => x.id === V.pane.slice(5));
       if (!p) { V.pane = null; renderPaneInner(); return; }
-      const src = '/pages/' + p.id + '?v=' + p.updatedAt;
+      const src = vt('/pages/' + p.id + '?v=' + p.updatedAt);
       if (pane.dataset.page === src) return;
       pane.dataset.page = src;
-      pane.innerHTML = '<div class="pane-head"><b>▤ ' + esc(p.title) + '</b><a class="btn sm" target="_blank" href="/pages/' + esc(p.id) + '">New tab ↗</a><button class="icon-btn" data-p="close">✕</button></div>' +
+      pane.innerHTML = '<div class="pane-head"><b>▤ ' + esc(p.title) + '</b><a class="btn sm" target="_blank" href="' + esc(vt('/pages/' + p.id)) + '">New tab ↗</a><button class="icon-btn" data-p="close">✕</button></div>' +
         '<iframe class="page-frame" sandbox="allow-scripts allow-modals allow-downloads" referrerpolicy="no-referrer" src="' + esc(src) + '"></iframe>';
       return;
     }
@@ -762,7 +811,7 @@
     if (v === 'library') {
       el.innerHTML = '<p class="lead">Reports, dashboards and trackers your bots saved. Ask any bot to "make a page" for something.</p>' +
         (S.pages.length ? '<div class="grid">' + S.pages.map((p) => { const b = botById(p.botId); return '<div class="tile" data-v="page" data-id="' + esc(p.id) + '"><b>▤ ' + esc(p.title) + '</b><small>' + esc(b ? b.name : '') + ' · ' + esc(fmtTime(p.updatedAt)) + ' · ' + esc(p.format) + '</small>' +
-          '<div style="display:flex;gap:6px;margin-top:4px"><a class="btn sm" target="_blank" href="/pages/' + esc(p.id) + '" data-stop="1">New tab ↗</a><button class="btn sm danger" data-v="del-page" data-id="' + esc(p.id) + '">Delete</button></div></div>'; }).join('') + '</div>'
+          '<div style="display:flex;gap:6px;margin-top:4px"><a class="btn sm" target="_blank" href="' + esc(vt('/pages/' + p.id)) + '" data-stop="1">New tab ↗</a><button class="btn sm danger" data-v="del-page" data-id="' + esc(p.id) + '">Delete</button></div></div>'; }).join('') + '</div>'
           : '<div class="empty"><h3>No pages yet</h3><p>Try: "Make me a page that tracks my open client requests."</p></div>');
     } else if (v === 'tasks') {
       const cols = [['Waiting', ['queued']], ['Working', ['working', 'held']], ['Done', ['done']], ['Failed / cancelled', ['failed', 'cancelled']]];
@@ -1089,20 +1138,20 @@
         lim('maxDepth', 'Hand-off limit', 'How many levels deep delegation and @mentions can go.', 1, 10) +
         lim('maxToolTurns', 'Max steps per turn', 'Tool calls in one turn before it stops.', 5, 500) +
         lim('turnTimeoutMin', 'Turn time limit (minutes)', '', 2, 240) +
-        lim('approvalTimeoutMin', 'Approval wait (minutes)', 'Unanswered approval cards are declined after this.', 1, 720) +
+        lim('approvalTimeoutMin', 'Approval cards stay open (minutes)', 'A bot waits up to 4½ minutes for a live answer, then moves on; the card stays answerable this long (default a day).', 5, 10080) +
         lim('sessionMaxTokens', 'Session size before refresh (tokens)', 'When a bot\'s context passes this, it saves notes to memory and starts a fresh session.', 50000, 1000000) +
       '</div></div>' +
       '<div data-pane="security" class="hidden">' +
         '<label class="field inline"><input type="checkbox" name="escalationGuard"' + (c.escalationGuard !== false ? ' checked' : '') + '><span>Ask me before a bot hands work to a bot with more permissions</span></label>' +
         '<small style="display:block;color:var(--muted);margin:-8px 0 14px">Stops a bot that was misled by something it read from getting a more powerful teammate to act for it.</small>' +
         '<div class="field"><span>Access key</span><div style="display:flex;gap:6px;flex-wrap:wrap"><input type="password" id="sec-key" readonly style="flex:1;min-width:160px;font-family:var(--mono);border:1px solid var(--line-strong);border-radius:8px;padding:7px 10px;background:var(--bg)">' +
-        '<button class="btn sm" data-m="show-key">Show</button><button class="btn sm" data-m="copy-link">Copy sign-in link</button><button class="btn sm danger" data-m="rotate">New key</button></div>' +
+        '<button class="btn sm" data-m="show-key">Show</button><button class="btn sm" data-m="copy-link">Copy sign-in link</button><button class="btn sm danger" data-m="rotate">New key</button><button class="btn sm" data-m="signout">Sign out</button></div>' +
         '<small>Anyone with this key (or the sign-in link) can use your bots. A new key signs out every other browser.</small></div>' +
         '<div class="field"><span>Recent security events</span><div id="sec-audit" style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px;font-size:12.5px"><div style="padding:8px;color:var(--muted)">Loading…</div></div></div>' +
       '</div>' +
       '<div data-pane="about" class="hidden"><p><b>Bullpen</b> — a local team of persistent AI bots, powered by the Claude Code CLI. Open source, MIT license.</p>' +
         '<dl class="kv"><dt>Data folder</dt><dd style="font:12px var(--mono)">' + esc(S.dataDir) + '</dd><dt>Today</dt><dd>' + (S.usage.today.turns || 0) + ' turns · $' + (S.usage.today.costUsd || 0).toFixed(2) + ' API-equivalent</dd></dl>' +
-        '<p><a class="btn sm" href="/api/backup">⤓ Download backup (.tar.gz)</a></p>' +
+        '<p><a class="btn sm" href="' + esc(vt('/api/backup')) + '">⤓ Download backup (.tar.gz)</a></p>' +
         '<p style="color:var(--muted);font-size:12.5px">Everything (chats, memory, pages, routines) is plain files in the data folder. Back it up like any folder. Keyboard: ⌘/Ctrl+K search · ⌘/Ctrl+Shift+I details · ⌘/Ctrl+, settings.</p></div>' +
       '</div><div class="modal-foot"><span class="grow"></span><button class="btn" data-m="x">Close</button><button class="btn primary" data-m="save">Save</button></div>', { wide: true });
     let sec = null;
@@ -1129,8 +1178,15 @@
       else if (a.dataset.m === 'rotate') {
         if (!(await confirmBox('Make a new access key?', 'Every other browser using Bullpen is signed out and needs the new key. This browser stays signed in.', 'New key'))) return;
         const r = await attempt(() => api('POST', '/api/security/rotate-key'));
-        if (r) { toast('New access key made'); settingsModal('security'); }
+        if (r) {
+          KEY = r.accessKey; VT = r.vt;
+          try { localStorage.setItem(KEY_STORE, KEY); } catch {}
+          connect();
+          toast('New access key made');
+          settingsModal('security');
+        }
       }
+      else if (a.dataset.m === 'signout') { try { localStorage.removeItem(KEY_STORE); } catch {} closeModal(); signIn(''); }
       else if (a.dataset.m === 'notify') { if (typeof Notification !== 'undefined') { await Notification.requestPermission(); a.textContent = Notification.permission === 'granted' ? 'Enabled ✓' : 'Blocked in browser settings'; } }
       else if (a.dataset.m === 'save') {
         const body = {};
@@ -1274,7 +1330,7 @@
 
   function connect() {
     if (V.sse) V.sse.close();
-    const es = new EventSource('/api/events');
+    const es = new EventSource(vt('/api/events'));
     V.sse = es;
     let dropped = false;
     es.onmessage = (e) => { try { onEvent(JSON.parse(e.data)); } catch (err) { console.error(err); } };
@@ -1283,6 +1339,7 @@
   }
 
   async function refreshState() {
+    VT = (await api('GET', '/api/whoami')).vt;
     const st = await api('GET', '/api/state');
     Object.assign(S, st);
     applyTheme();
@@ -1293,7 +1350,9 @@
 
   // ---------------- boot ----------------
   (async function boot() {
-    try { await refreshState(); } catch (e) { document.body.innerHTML = '<div class="empty"><h3>Can\'t reach Bullpen</h3><p>' + esc(e.message) + '</p></div>'; return; }
+    if (!KEY) return signIn('');
+    try { await refreshState(); } catch (e) { if (KEY && e.message !== 'Sign in required') document.body.innerHTML = '<div class="empty"><h3>Can\'t reach Bullpen</h3><p>' + esc(e.message) + '</p></div>'; return; }
+    setInterval(() => { api('GET', '/api/whoami').then((r) => { if (r.vt !== VT) { VT = r.vt; connect(); } }).catch(() => {}); }, 3600e3);
     go(fromHash(), { replace: true });
     connect();
   })();

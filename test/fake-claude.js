@@ -47,6 +47,12 @@ function startMcp(cfgPath) {
     let seq = 0;
     const rpc = async (method, params) => {
       const r = await fetch(s.url, { method: 'POST', headers: { ...s.headers, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++seq, method, params }) });
+      if (/event-stream/.test(r.headers.get('content-type') || '')) {
+        fs.appendFileSync(path.join(dir, 'transports.log'), 'sse-response\n');
+        const text = await r.text();
+        const data = text.split('\n').filter((l) => l.startsWith('data: ')).pop();
+        return JSON.parse(data.slice(6));
+      }
       return r.json();
     };
     return { rpc, close: () => {} };

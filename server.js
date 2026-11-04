@@ -20,7 +20,17 @@ function arg(name, dflt) {
 const PORT = parseInt(arg('port', '4747'), 10);
 const HOST = arg('host', '127.0.0.1');
 // Default data folder is per-user (~/.bullpen), so other accounts on a shared machine can't read it.
-const DATA = path.resolve(arg('data', path.join(os.homedir(), '.bullpen')));
+// Versions before 0.2 kept it in ./data next to server.js; keep using that one if it's there.
+function defaultData() {
+  const home = path.join(os.homedir(), '.bullpen');
+  const old = path.join(__dirname, 'data');
+  if (!fs.existsSync(path.join(home, 'config.json')) && fs.existsSync(path.join(old, 'config.json'))) {
+    console.log('  Using the existing data folder ' + old + ' (new installs use ' + home + '; move it there whenever you like).');
+    return old;
+  }
+  return home;
+}
+const DATA = path.resolve(arg('data', '') || defaultData());
 const PUBLIC = path.join(__dirname, 'public');
 const BASE = 'http://127.0.0.1:' + PORT;
 
@@ -34,51 +44,40 @@ const MIME = {
 const app = new App({ dataDir: DATA, baseUrl: BASE });
 
 // ---------------- access key ----------------
-// Bullpen listens on loopback, but on a shared machine other accounts can reach loopback too.
-// Every request needs the access key: as an HttpOnly cookie set by the sign-in page or by
-// opening /?key=…, or as "Authorization: Bearer <key>" for scripts.
+// Bullpen listens on loopback, but on a shared machine other accounts can reach loopback too, and
+// cookies are shared across every port on 127.0.0.1. So there is no cookie: the browser keeps the
+// access key in localStorage (scoped to this exact origin, port included) and sends it as an
+// "Authorization: Bearer" header. Things a browser loads without headers (the live event stream,
+// page iframes, file links, exports) carry a read-only "view token" derived from the key that
+// changes daily.
 const crypto = require('crypto');
 const SECRET_FILE = 'secret.json';
 let secret = app.store.readJSON(SECRET_FILE, null);
-if (!secret || !secret.accessKey || !secret.cookie) {
-  secret = { accessKey: crypto.randomBytes(18).toString('base64url'), cookie: crypto.randomBytes(32).toString('base64url') };
+if (!secret || !secret.accessKey) {
+  secret = { accessKey: crypto.randomBytes(18).toString('base64url') };
   app.store.writeJSON(SECRET_FILE, secret);
 }
-const COOKIE = 'bp_session';
-let OPEN_URL = BASE + '/?key=' + encodeURIComponent(secret.accessKey);
+const openUrl = () => BASE + '/#key=' + encodeURIComponent(secret.accessKey);
 function same(a, b) {
   const x = Buffer.from(String(a || '')); const y = Buffer.from(String(b || ''));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
-function cookieOf(req) {
-  for (const part of String(req.headers.cookie || '').split(';')) {
-    const i = part.indexOf('=');
-    if (i > 0 && part.slice(0, i).trim() === COOKIE) return part.slice(i + 1).trim();
-  }
-  return '';
+function viewToken(day = Math.floor(Date.now() / 86400e3)) {
+  return crypto.createHmac('sha256', secret.accessKey).update('view:' + day).digest('base64url').slice(0, 32);
 }
-function authed(req) {
+function keyOk(req) {
   const h = String(req.headers.authorization || '');
-  return same(cookieOf(req), secret.cookie) || (h.startsWith('Bearer ') && same(h.slice(7), secret.accessKey));
+  return h.startsWith('Bearer ') && same(h.slice(7), secret.accessKey);
 }
-function setSession(res, location) {
-  res.writeHead(302, { location, 'set-cookie': COOKIE + '=' + secret.cookie + '; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000', 'cache-control': 'no-store', ...SEC_HEADERS });
-  res.end();
+function viewOk(url) {
+  const vt = url.searchParams.get('vt');
+  const day = Math.floor(Date.now() / 86400e3);
+  return !!vt && (same(vt, viewToken(day)) || same(vt, viewToken(day - 1)));
 }
-const loginFails = [];
-function loginLimited() {
-  const now = Date.now();
-  while (loginFails.length && now - loginFails[0] > 10 * 60e3) loginFails.shift();
-  return loginFails.length >= 10;
-}
-function loginPage(msg) {
-  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bullpen — sign in</title>' +
-    '<style>body{font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:#f3f4f7;color:#1c1f24;display:grid;place-items:center;min-height:100vh;margin:0}' +
-    'form{background:#fff;padding:28px;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.1);width:min(380px,90vw)}h1{font-size:18px;margin:0 0 6px}p{color:#5b6370;font-size:13.5px;margin:0 0 14px}' +
-    'input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cfd4dc;border-radius:8px;font:inherit;margin-bottom:12px}button{width:100%;padding:9px;border:0;border-radius:8px;background:#4f6bed;color:#fff;font:inherit;font-weight:600;cursor:pointer}' +
-    '.err{color:#d23b3b}@media (prefers-color-scheme:dark){body{background:#121417;color:#e7e9ed}form{background:#1d2025}input{background:#17191d;color:#e7e9ed;border-color:#3a3f48}p{color:#9aa1ad}}</style></head>' +
-    '<body><form method="post" action="/login"><h1>Bullpen</h1><p>Enter the access key. It\'s printed in the window where Bullpen is running, and saved in <code>secret.json</code> in your data folder.</p>' +
-    (msg ? '<p class="err">' + msg + '</p>' : '') + '<input name="key" type="password" autocomplete="current-password" autofocus placeholder="Access key"><button>Sign in</button></form></body></html>';
+let lastFailAudit = 0;
+function authFailed() {
+  // Wrong keys are logged (at most once a minute) but never lock anyone out: the key is 144 bits.
+  if (Date.now() - lastFailAudit > 60e3) { lastFailAudit = Date.now(); app.audit('auth.failed', {}); }
 }
 
 // ---------------- helpers ----------------
@@ -147,11 +146,15 @@ function serveStatic(res, file) {
 // windows or submit forms, so a page can't carry data out even if a bot was misled.
 const PAGE_CSP = "sandbox allow-scripts allow-modals allow-downloads; default-src 'none'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src data: blob: 'self'; font-src data:; media-src data: blob:; form-action 'none'; frame-ancestors 'self'; base-uri 'none'";
 
+// Markdown pages are rendered by the same in-house renderer, inlined: a sandboxed page has no
+// origin of its own, so it can't load anything from Bullpen.
+let pageAssets = null;
 function pageShell(title, markdown) {
+  if (!pageAssets) pageAssets = { css: fs.readFileSync(path.join(PUBLIC, 'page.css'), 'utf8'), js: fs.readFileSync(path.join(PUBLIC, 'md.js'), 'utf8') };
   const data = JSON.stringify(markdown).replace(/</g, '\\u003c');
   return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' +
-    title.replace(/[<>&"]/g, '') + '</title><link rel="stylesheet" href="/page.css"></head><body><main id="doc"></main>' +
-    '<script src="/md.js"></script><script>document.getElementById("doc").innerHTML = window.renderMarkdown(' + data + ');</script></body></html>';
+    title.replace(/[<>&"]/g, '') + '</title><style>' + pageAssets.css + '</style></head><body><main id="doc"></main>' +
+    '<script>' + pageAssets.js.replace(/<\/script/gi, '<\\/script') + '</script><script>document.getElementById("doc").innerHTML = window.renderMarkdown(' + data + ');</script></body></html>';
 }
 
 // ---------------- SSE ----------------
@@ -281,14 +284,14 @@ route('GET', '/api/backup', (req, res) => {
   app.audit('backup', { detail: 'downloaded' });
   return undefined;
 });
-route('GET', '/api/security', () => ({ accessKey: secret.accessKey, openUrl: OPEN_URL, dataDir: app.store.dir, audit: app.readAudit(200) }));
-route('POST', '/api/security/rotate-key', (req, res) => {
-  secret = { accessKey: crypto.randomBytes(18).toString('base64url'), cookie: crypto.randomBytes(32).toString('base64url') };
+route('GET', '/api/whoami', () => ({ ok: true, vt: viewToken() }));
+route('GET', '/api/security', () => ({ accessKey: secret.accessKey, openUrl: openUrl(), dataDir: app.store.dir, audit: app.readAudit(200) }));
+route('POST', '/api/security/rotate-key', () => {
+  secret = { accessKey: crypto.randomBytes(18).toString('base64url') };
   app.store.writeJSON(SECRET_FILE, secret);
-  OPEN_URL = BASE + '/?key=' + encodeURIComponent(secret.accessKey);
   app.audit('access-key.rotated', {});
-  res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': COOKIE + '=' + secret.cookie + '; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000', 'cache-control': 'no-store', ...SEC_HEADERS });
-  res.end(JSON.stringify({ accessKey: secret.accessKey, openUrl: OPEN_URL }));
+  for (const c of clients) c.end(); // every open window has to sign in again
+  return { accessKey: secret.accessKey, openUrl: openUrl(), vt: viewToken() };
 });
 route('POST', '/api/cli/check', () => { const cli = require('./lib/claude-cli'); const i = cli.detect(app.config.claudePath, { force: true }); return { found: i.found, path: i.path, version: i.version, error: i.error }; });
 
@@ -326,19 +329,39 @@ route('POST', '/api/mcp/call', async (req) => {
 // Bullpen's tools over MCP "Streamable HTTP", answered with plain JSON. Claude Code connects to
 // this directly, so a bot turn needs no extra helper process. Auth: the per-turn bearer token.
 const { TOOLS } = require('./lib/tools-def');
+const MCP_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 async function handleMcp(req, res) {
   if (req.method !== 'POST') return send(res, 405, '', { allow: 'POST' });
   const auth = String(req.headers.authorization || '');
   const run = app.runner.byToken.get(auth.startsWith('Bearer ') ? auth.slice(7) : '');
+  if (!run) { req.resume(); return send(res, 401, { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'This turn has ended or the token is invalid.' } }); }
   let body;
   try { body = JSON.parse((await readBody(req, 8e6)).toString('utf8')); } catch { return send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }); }
-  if (!run) return send(res, 401, { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'This turn has ended or the token is invalid.' } });
+  const isCall = (m) => m && m.method === 'tools/call' && m.id !== undefined && m.id !== null;
+  // A tool call can wait on the user (approval cards) for many minutes. Answering as an event
+  // stream sends headers at once plus keep-alives, so the CLI never gives up on the request.
+  if (!Array.isArray(body) && isCall(body) && /text\/event-stream/.test(String(req.headers.accept || ''))) {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', ...SEC_HEADERS });
+    res.write(': working\n\n');
+    const ka = setInterval(() => res.write(': keep-alive\n\n'), 15000);
+    res.on('close', () => clearInterval(ka));
+    const p = body.params || {};
+    let r;
+    try { r = await callTool(app, run, String(p.name || ''), p.arguments || {}); } catch (e) { r = { isError: true, text: e.message }; }
+    clearInterval(ka);
+    const out = { jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: String(r.text == null ? '' : r.text) }], isError: !!r.isError } };
+    res.end('event: message\ndata: ' + JSON.stringify(out) + '\n\n');
+    return;
+  }
   const one = async (m) => {
     if (!m || typeof m !== 'object' || m.id === undefined || m.id === null) return null; // notification
+    if (!m.method) return null; // a response sent by the client
     const reply = (result) => ({ jsonrpc: '2.0', id: m.id, result });
     switch (m.method) {
-      case 'initialize':
-        return reply({ protocolVersion: (m.params && m.params.protocolVersion) || '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'bullpen', version: pkg.version } });
+      case 'initialize': {
+        const asked = m.params && m.params.protocolVersion;
+        return reply({ protocolVersion: MCP_VERSIONS.includes(asked) ? asked : MCP_VERSIONS[1], capabilities: { tools: {} }, serverInfo: { name: 'bullpen', version: pkg.version } });
+      }
       case 'ping': return reply({});
       case 'tools/list': return reply({ tools: TOOLS });
       case 'tools/call': {
@@ -381,27 +404,20 @@ async function handle(req, res) {
     if ((origin && origin !== 'null' && origin !== 'http://' + req.headers.host) || site === 'cross-site') return send(res, 403, { error: 'Cross-site request refused' });
   }
 
-  if (pathname === '/login') {
-    if (req.method === 'POST') {
-      if (loginLimited()) return send(res, 429, loginPage('Too many attempts. Wait a few minutes.'), { 'content-type': 'text/html; charset=utf-8' });
-      const key = new URLSearchParams((await readBody(req, 4096).catch(() => Buffer.alloc(0))).toString('utf8')).get('key');
-      if (same(key, secret.accessKey)) return setSession(res, '/');
-      loginFails.push(Date.now());
-      app.audit('login.failed', {});
-      return send(res, 401, loginPage('That key didn\'t match.'), { 'content-type': 'text/html; charset=utf-8' });
-    }
-    return send(res, 200, loginPage(''), { 'content-type': 'text/html; charset=utf-8' });
-  }
+  if (pathname === '/login') { res.writeHead(302, { location: '/', 'cache-control': 'no-store' }); return res.end(); }
 
+  // Who may do what:
+  //  - the app's own static files (no data in them): anyone who can reach the port;
+  //  - webhooks and the stdio tool helper: their own secrets;
+  //  - reading the event stream, pages, files, exports and backups: the access key or a view token;
+  //  - everything else under /api: the access key.
+  const isStatic = req.method === 'GET' && !pathname.startsWith('/api/') && !pathname.startsWith('/pages/') && !pathname.startsWith('/files/');
   const openRoute = req.method === 'POST' && (pathname === '/api/mcp/call' || pathname.startsWith('/api/hooks/'));
-  if (!openRoute && !authed(req)) {
-    if (req.method === 'GET' && pathname === '/' && url.searchParams.get('key')) {
-      if (!loginLimited() && same(url.searchParams.get('key'), secret.accessKey)) return setSession(res, '/');
-      loginFails.push(Date.now());
-    }
+  const viewRoute = req.method === 'GET' && (pathname === '/api/events' || pathname.startsWith('/pages/') || pathname.startsWith('/files/') || pathname === '/api/backup' || /^\/api\/channels\/[^/]+\/export$/.test(pathname));
+  if (!isStatic && !openRoute && !keyOk(req) && !(viewRoute && viewOk(url))) {
+    authFailed();
     if (pathname.startsWith('/api/')) return send(res, 401, { error: 'Sign in required' });
-    if (req.method === 'GET') { res.writeHead(302, { location: '/login', 'cache-control': 'no-store' }); return res.end(); }
-    return send(res, 401, 'Sign in required');
+    return send(res, 401, 'Sign in required. Open Bullpen from its sign-in link.');
   }
 
   if (pathname.startsWith('/api/')) {
@@ -478,11 +494,11 @@ server.on('error', (e) => {
 app.load();
 server.listen(PORT, HOST, () => {
   const info = app.publicState().cli;
-  console.log('\n  Bullpen ' + pkg.version + ' — open this link to sign in:\n  ' + OPEN_URL);
+  console.log('\n  Bullpen ' + pkg.version + ' — open this link to sign in:\n  ' + openUrl());
   console.log('  Data:   ' + DATA);
   console.log('  Claude: ' + (info.found ? info.version + ' (' + info.path + ')' : 'NOT FOUND — ' + info.error));
   console.log('');
-  if (process.argv.includes('--open')) openBrowser(OPEN_URL);
+  if (process.argv.includes('--open')) openBrowser(openUrl());
 });
 
 function openBrowser(u) {

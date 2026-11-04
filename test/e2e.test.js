@@ -321,7 +321,8 @@ test('long sessions: bot saves notes, then starts a fresh session with a recap',
 
 test('tools over HTTP by default, stdio helper as a fallback; /mcp needs a live turn token', async () => {
   const transports = () => fs.readFileSync(path.join(T.tmp, 'fake', 'transports.log'), 'utf8').trim().split('\n');
-  assert.ok(transports().every((t) => t === 'http'), 'default transport is http');
+  assert.ok(transports().filter((t) => t !== 'sse-response').every((t) => t === 'http'), 'default transport is http');
+  assert.ok(transports().includes('sse-response'), 'tool calls are answered as an event stream');
   const bad = await fetch(T.base + '/mcp', { method: 'POST', headers: { authorization: 'Bearer nope', 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' });
   assert.strictEqual(bad.status, 401);
   const get = await fetch(T.base + '/mcp');
@@ -330,38 +331,55 @@ test('tools over HTTP by default, stdio helper as a fallback; /mcp needs a live 
   const ch = 'dm:' + chief.id;
   await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'via stdio\n@@call memory_add {"text":"stdio works"}' });
   await T.waitFor(async () => /stdio works/.test((await T.api('GET', '/api/bots/' + chief.id + '/memory')).data.text), 15000, 'stdio tool call');
-  assert.strictEqual(transports().pop(), 'stdio');
+  assert.strictEqual(transports().filter((t) => t !== 'sse-response').pop(), 'stdio');
   await T.api('PATCH', '/api/config', { mcpTransport: 'http' });
 });
 
-test('access key: sign-in required, cookie session, cross-site writes refused, headers set', async () => {
+test('access key: header auth, read-only view tokens, no cookies, no lockout', async () => {
   const st = await fetch(T.base + '/api/state');
   assert.strictEqual(st.status, 401);
-  const root = await fetch(T.base + '/', { redirect: 'manual' });
-  assert.strictEqual(root.status, 302);
-  assert.strictEqual(root.headers.get('location'), '/login');
-  const wrong = await fetch(T.base + '/?key=nope', { redirect: 'manual' });
-  assert.strictEqual(wrong.headers.get('location'), '/login');
-  const right = await fetch(T.base + '/?key=' + encodeURIComponent(T.secret.accessKey), { redirect: 'manual' });
-  const cookie = right.headers.get('set-cookie');
-  assert.match(cookie, /HttpOnly/);
-  assert.match(cookie, /SameSite=Strict/);
-  const withCookie = await fetch(T.base + '/api/state', { headers: { cookie: cookie.split(';')[0] } });
-  assert.strictEqual(withCookie.status, 200);
-  const page = await fetch(T.base + '/', { headers: { cookie: cookie.split(';')[0] } });
-  assert.match(page.headers.get('content-security-policy'), /script-src 'self'/);
-  assert.match(page.headers.get('content-security-policy'), /img-src 'self' data: blob:/);
-  assert.strictEqual(page.headers.get('x-frame-options'), 'DENY');
-  const bad = await fetch(T.base + '/login', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'key=wrong' });
-  assert.strictEqual(bad.status, 401);
-  const good = await fetch(T.base + '/login', { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'key=' + encodeURIComponent(T.secret.accessKey) });
-  assert.strictEqual(good.status, 302);
+  const root = await fetch(T.base + '/');
+  assert.strictEqual(root.status, 200, 'the app shell itself holds no data');
+  assert.strictEqual(root.headers.get('set-cookie'), null);
+  assert.match(root.headers.get('content-security-policy'), /script-src 'self'/);
+  assert.match(root.headers.get('content-security-policy'), /img-src 'self' data: blob:/);
+  assert.strictEqual(root.headers.get('x-frame-options'), 'DENY');
+  const login = await fetch(T.base + '/login', { redirect: 'manual' });
+  assert.strictEqual(login.headers.get('location'), '/');
+  for (let i = 0; i < 25; i++) await fetch(T.base + '/api/state', { headers: { authorization: 'Bearer wrong' + i } });
+  const who = await T.api('GET', '/api/whoami');
+  assert.strictEqual(who.status, 200, 'the right key still works after many wrong ones');
+  assert.strictEqual(who.data.vt.length, 32);
+  const vt = who.data.vt;
+  // view token: read-only things the browser loads by itself
+  const ac = new AbortController();
+  const ev = await fetch(T.base + '/api/events?vt=' + vt, { signal: ac.signal });
+  assert.strictEqual(ev.status, 200);
+  assert.match(ev.headers.get('content-type'), /event-stream/);
+  ac.abort();
+  const exp = await fetch(T.base + '/api/channels/dm:' + chief.id + '/export?vt=' + vt);
+  assert.strictEqual(exp.status, 200);
+  const badVt = await fetch(T.base + '/api/events?vt=nope');
+  assert.strictEqual(badVt.status, 401);
+  const vtWrite = await fetch(T.base + '/api/bots?vt=' + vt, { method: 'POST', headers: { 'X-Bullpen': '1', 'content-type': 'application/json' }, body: '{"name":"x"}' });
+  assert.strictEqual(vtWrite.status, 401, 'a view token cannot change anything');
+  const vtState = await fetch(T.base + '/api/state?vt=' + vt);
+  assert.strictEqual(vtState.status, 401, 'a view token cannot read the API');
   const xsite = await fetch(T.base + '/api/bots', { method: 'POST', headers: { ...T.auth, 'X-Bullpen': '1', 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{"name":"x"}' });
   assert.strictEqual(xsite.status, 403);
   if (process.platform !== 'win32') {
     assert.strictEqual(fs.statSync(path.join(T.tmp, 'data')).mode & 0o777, 0o700);
     assert.strictEqual(fs.statSync(path.join(T.tmp, 'data', 'secret.json')).mode & 0o777, 0o600);
   }
+});
+
+test('markdown pages are self-contained (no requests back to Bullpen)', async () => {
+  const pages = (await T.api('GET', '/api/state')).data.pages;
+  const md = pages.find((p) => p.format === 'markdown');
+  const html = await (await fetch(T.base + '/pages/' + md.id, { headers: T.auth })).text();
+  assert.ok(!/src="\/md\.js"|href="\/page\.css"/.test(html), 'no external assets');
+  assert.match(html, /window\.renderMarkdown/);
+  assert.match(html, /<style>/);
 });
 
 test('regressions: malformed URLs never take the server down', async () => {
@@ -587,9 +605,35 @@ test('backup downloads the data folder without the access key', async () => {
   assert.ok(!names.some((n) => /secret\.json/.test(n)), 'access key not in the backup');
 });
 
+test('approvals answered after the bot moved on: card stays open, approval gives a new turn and a one-time permission', async () => {
+  const b = (await T.api('POST', '/api/bots', { name: 'Patient' })).data.bot;
+  const ch = 'dm:' + b.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'deploy\n@@perm Bash {"command":"npm run deploy"}' });
+  const card = await T.waitFor(async () => (await T.msgs(ch)).find((m) => m.kind === 'card' && m.card.type === 'approval'), 15000, 'card');
+  // nobody answers for longer than the live wait
+  await T.waitFor(async () => (await T.msgs(ch)).find((m) => m.id === card.id && m.card.status === 'later'), 15000, 'card moved to later');
+  await idle(b.id);
+  const reply = (await T.msgs(ch)).filter((m) => m.role === 'bot' && m.kind === 'text').pop();
+  assert.match(reply.text, /perm Bash -> deny/, 'the bot was told to move on');
+  assert.ok((await T.api('GET', '/api/pending')).data.items.some((i) => i.msg.id === card.id), 'still in Needs you');
+  const callsBefore = T.calls().length;
+  assert.strictEqual((await T.api('POST', '/api/channels/' + ch + '/cards/' + card.id, { decision: 'allow' })).status, 200);
+  await T.waitFor(() => T.calls().length > callsBefore, 15000, 'new turn after approval');
+  await idle(b.id);
+  const next = T.calls().filter((c) => c.settings).pop();
+  assert.ok(next && next.settings.permissions.allow.includes('Bash(npm run deploy)'), 'one-time permission passed to the next turn');
+  assert.ok(history().some((h) => /The user approved your earlier request/.test(h.in)));
+  const after = (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === b.id);
+  assert.deepStrictEqual(after.grants, [], 'one-time permission used up');
+  assert.deepStrictEqual(after.alwaysAllow, [], 'not made permanent');
+  assert.strictEqual((await T.msgs(ch)).find((m) => m.id === card.id).card.status, 'allowed');
+  assert.ok(!(await T.api('GET', '/api/pending')).data.items.some((i) => i.msg.id === card.id));
+  await T.api('DELETE', '/api/bots/' + b.id);
+});
+
 test('security settings: key rotation, webhook rate limit, audit of settings changes', async () => {
   const before = (await T.api('GET', '/api/security')).data;
-  assert.ok(before.accessKey && before.openUrl.includes('?key='));
+  assert.ok(before.accessKey && before.openUrl.includes('/#key='), 'the key travels in the URL fragment, never sent to the server');
   const unauth = await fetch(T.base + '/api/security');
   assert.strictEqual(unauth.status, 401);
   await T.api('PATCH', '/api/config', { maxDepth: 5 });

@@ -14,7 +14,13 @@
 
   function inline(src) {
     const keep = [];
-    const hold = (html) => { keep.push(html); return '\u0000' + (keep.length - 1) + '\u0000'; };
+    const links = new Set();
+    const hold = (html, isLink) => { keep.push(html); if (isLink) links.add(keep.length - 1); return '\u0000' + (keep.length - 1) + '\u0000'; };
+    const linkText = (t) => t.split(/(\u0000\d+\u0000)/).map((part) => {
+      const m = /^\u0000(\d+)\u0000$/.exec(part);
+      if (m) return links.has(+m[1]) ? '' : keep[+m[1]];
+      return emph(esc(part));
+    }).join('');
     let s = String(src);
     s = s.replace(/(`+)([^`\n]|[^`\n][\s\S]*?[^`\n])\1(?!`)/g, (_, t, c) => hold('<code>' + esc(c.trim() ? c : c) + '</code>'));
     // Only same-origin images are shown inline; remote ones become links, so rendering a message
@@ -23,14 +29,14 @@
       const url = safeUrl(u);
       if (!url) return m;
       if (/^\/(?!\/)/.test(url)) return hold('<img alt="' + esc(alt) + '" src="' + esc(url) + '">');
-      return hold('<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">🖼 ' + esc(alt || url) + '</a>');
+      return hold('<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">🖼 ' + esc(alt || url) + '</a>', true);
     });
     s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (m, t, u) => {
       const url = safeUrl(u);
       // Link text gets emphasis but never another link inside it.
-      return url ? hold('<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + emph(esc(t.replace(/\u0000\d+\u0000/g, ''))) + '</a>') : t;
+      return url ? hold('<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + linkText(t) + '</a>', true) : t;
     });
-    s = s.replace(/(^|[\s(])(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g, (m, pre, u) => pre + hold('<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(u) + '</a>'));
+    s = s.replace(/(^|[\s(])(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g, (m, pre, u) => pre + hold('<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(u) + '</a>', true));
     s = emph(esc(s));
     s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[+i]);
     return s;

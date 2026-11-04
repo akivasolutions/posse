@@ -88,3 +88,14 @@ test('always-allow rules are scoped to one command, domain or folder', () => {
   assert.strictEqual(suggestRule('Read', { file_path: 'relative.txt' }), '', 'no rule rather than a broad one');
   assert.strictEqual(suggestRule('Mystery', {}), '');
 });
+
+test('always-allow never covers the whole disk, a drive, or the home folder', () => {
+  const { suggestRule } = require('../lib/app');
+  const os = require('os');
+  const home = os.homedir().replace(/\\/g, '/').replace(/^([A-Za-z]):/, (m, d) => '/' + d.toLowerCase());
+  assert.strictEqual(suggestRule('Read', { file_path: '/etc_file' }), 'Read(//etc_file)', 'file directly under / gets an exact-file rule');
+  assert.strictEqual(suggestRule('Grep', { path: '/' }), '');
+  assert.strictEqual(suggestRule('Edit', { file_path: require('path').join(os.homedir(), 'notes.md') }), 'Edit(/' + home + '/notes.md)', 'home folder: exact file only');
+  assert.strictEqual(suggestRule('Read', { file_path: 'C:\\secret.txt' }), 'Read(//c/secret.txt)');
+  assert.strictEqual(suggestRule('Read', { file_path: '/Users/pat/Clients/Acme/a.txt' }), 'Read(//Users/pat/Clients/Acme/**)');
+});

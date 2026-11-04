@@ -9,7 +9,7 @@
 //   @@perm <Tool> <json>     ask the --permission-prompt-tool for approval
 //   @@sleep <ms>             wait (to test Stop)
 //   @@fail <message>         end the turn with an error
-//   @@reply <text>           final reply text (default: "ok: <first line of input>")
+//   @@reply <text>           final reply text (default: "ok: <first line of input>"); {AT} becomes @
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -98,7 +98,7 @@ async function main() {
       out({ type: 'result', subtype: 'error_during_execution', is_error: true, result: m[1] || 'fake failure', session_id: sid, total_cost_usd: 0, usage: {} });
       process.exit(1);
     } else if ((m = /^@@reply\s+(.*)$/.exec(line))) {
-      reply = m[1];
+      reply = m[1].replace(/\{AT\}/g, '@');
     }
   }
   if (mcp) mcp.close();

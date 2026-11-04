@@ -170,12 +170,15 @@ test('group chat: mention routing and bot-to-bot @mentions', async () => {
   const analyst = st.bots.find((b) => b.handle === 'analyst');
   const room = (await T.api('POST', '/api/rooms', { name: 'Close', members: [chief.id, analyst.id] })).data.room;
   const ch = 'room:' + room.id;
-  await T.api('POST', '/api/channels/' + ch + '/messages', { text: '@analyst kick off\n@@reply On it — @chief-of-staff please review.' });
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: '@analyst kick off\n@@reply On it — {AT}chief-of-staff please review.' });
   await T.waitFor(async () => (await T.msgs(ch)).some((m) => m.role === 'bot' && m.botId === analyst.id), 15000, 'analyst in room');
   // The analyst's reply mentioned the chief, so the chief is called in (and sees the room transcript).
   await T.waitFor(async () => (await T.msgs(ch)).some((m) => m.role === 'bot' && m.botId === chief.id), 15000, 'chief called in');
   const msgs = await T.msgs(ch);
-  assert.ok(!msgs.some((m) => m.role === 'bot' && m.botId === chief.id && msgs.indexOf(m) < msgs.findIndex((x) => x.botId === analyst.id)), 'chief answered after analyst');
+  const ai = msgs.findIndex((x) => x.role === 'bot' && x.botId === analyst.id);
+  const ci = msgs.findIndex((x) => x.role === 'bot' && x.botId === chief.id);
+  assert.ok(ai >= 0 && ci > ai, 'chief was called in by the analyst, after it');
+  assert.ok(history().some((h) => /Group chat "Close"/.test(h.in) && /On it — @chief-of-staff please review/.test(h.in)), 'chief saw the room transcript');
 });
 
 test('routines: run now, smart notify keeps quiet results quiet', async () => {

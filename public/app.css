@@ -318,3 +318,13 @@ textarea.mem { width: 100%; min-height: 140px; border: 1px solid var(--line-stro
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* message tools, context meter, search hit */
+.msg-tools { position: absolute; top: 4px; right: 18px; display: none; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 1px; }
+.msg:hover .msg-tools { display: flex; }
+.msg-tools button { border: 0; background: none; width: 26px; height: 24px; border-radius: 6px; color: var(--text-2); font-size: 13px; }
+.msg-tools button:hover { background: var(--side-hover); }
+.meter { height: 4px; background: var(--bg-sunk); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--accent); }
+.msg.flash { background: color-mix(in srgb, var(--warn) 14%, var(--bg)); }
+.msg.system .btn { margin-left: 8px; }

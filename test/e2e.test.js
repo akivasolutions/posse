@@ -491,6 +491,58 @@ test('escalation guard in group chats: a call-in card instead of an automatic ca
   await T.api('DELETE', '/api/bots/' + ops.id);
 });
 
+test('needs-you inbox lists cards waiting on the user and drops them once answered', async () => {
+  const ch = 'dm:' + chief.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'q\n@@call ask_user {"question":"Inbox test?","options":["Yes","No"]}' });
+  const item = await T.waitFor(async () => (await T.api('GET', '/api/pending')).data.items.find((i) => i.msg.card.question === 'Inbox test?'), 15000, 'pending item');
+  assert.strictEqual(item.ch, ch);
+  assert.ok((await T.api('GET', '/api/state')).data.pendingCount >= 1);
+  await T.api('POST', '/api/channels/' + ch + '/cards/' + item.msg.id, { choices: ['Yes'] });
+  assert.ok(!(await T.api('GET', '/api/pending')).data.items.some((i) => i.msg.id === item.msg.id));
+  await idle(chief.id);
+});
+
+test('search, export, remember, retry and daily budget', async () => {
+  const ch = 'dm:' + chief.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'The Zephyr account renews in April' });
+  await T.waitFor(async () => (await T.api('GET', '/api/search?q=zephyr')).data.results.length >= 1, 15000, 'search hit');
+  const hits = (await T.api('GET', '/api/search?q=ZEPHYR')).data.results;
+  assert.ok(hits.some((h) => h.role === 'user' && /Zephyr account renews/.test(h.snippet)), 'case-insensitive');
+  assert.deepStrictEqual((await T.api('GET', '/api/search?q=z')).data.results, [], 'needs 2+ characters');
+  const exp = await fetch(T.base + '/api/channels/' + ch + '/export', { headers: T.auth });
+  assert.match(exp.headers.get('content-disposition'), /attachment/);
+  assert.match(await exp.text(), /The Zephyr account renews in April/);
+  await idle(chief.id);
+  const userMsg = (await T.msgs(ch)).reverse().find((m) => m.role === 'user' && /Zephyr/.test(m.text));
+  const rem = await T.api('POST', '/api/channels/' + ch + '/messages/' + userMsg.id + '/remember');
+  assert.strictEqual(rem.status, 200);
+  assert.match((await T.api('GET', '/api/bots/' + chief.id + '/memory')).data.text, /Zephyr account renews in April/);
+  // retry
+  const flaky = (await T.api('POST', '/api/bots', { name: 'Retry Me' })).data.bot;
+  await T.api('POST', '/api/channels/dm:' + flaky.id + '/messages', { text: 'try\n@@fail first time' });
+  const err = await T.waitFor(async () => (await T.msgs('dm:' + flaky.id)).find((m) => m.role === 'system' && m.meta && m.meta.retry), 15000, 'failure with retry');
+  const callsBefore = T.calls().length;
+  assert.strictEqual((await T.api('POST', '/api/channels/dm:' + flaky.id + '/messages/' + err.id + '/retry')).status, 200);
+  await T.waitFor(() => T.calls().length > callsBefore, 15000, 'retried turn');
+  assert.strictEqual((await T.api('POST', '/api/channels/dm:' + flaky.id + '/messages/' + err.id + '/retry')).status, 409, 'only once');
+  await idle(flaky.id);
+  await T.api('PATCH', '/api/bots/' + flaky.id, { paused: false });
+  await T.api('POST', '/api/channels/dm:' + flaky.id + '/messages', { text: 'a successful turn\n@@reply success-ok' });
+  await T.waitFor(async () => (await T.msgs('dm:' + flaky.id)).some((m) => m.role === 'bot' && m.text === 'success-ok'), 15000, 'success');
+  await idle(flaky.id);
+  // budget: fake turns cost $0.001, so a $0.001 budget blocks after one turn
+  await T.api('PATCH', '/api/bots/' + flaky.id, { dailyBudgetUsd: 0.001 });
+  const b = (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === flaky.id);
+  assert.ok(b.spentToday > 0);
+  await T.api('POST', '/api/channels/dm:' + flaky.id + '/messages', { text: 'over budget' });
+  await T.waitFor(async () => (await T.msgs('dm:' + flaky.id)).some((m) => m.role === 'system' && /daily budget/.test(m.text)), 15000, 'budget notice');
+  const st = (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === flaky.id).status;
+  assert.strictEqual(st.state, 'queued');
+  assert.match(st.why, /daily budget/);
+  await T.api('POST', '/api/bots/' + flaky.id + '/clear-queue');
+  await T.api('DELETE', '/api/bots/' + flaky.id);
+});
+
 test('security settings: key rotation, webhook rate limit, audit of settings changes', async () => {
   const before = (await T.api('GET', '/api/security')).data;
   assert.ok(before.accessKey && before.openUrl.includes('?key='));

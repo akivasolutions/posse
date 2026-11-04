@@ -213,6 +213,17 @@ route('POST', '/api/rooms', async (req) => ({ room: app.createRoom(await json(re
 route('PATCH', '/api/rooms/:id', async (req, res, p) => ({ room: app.updateRoom(p.id, await json(req)) }));
 route('DELETE', '/api/rooms/:id', (req, res, p) => { app.deleteRoom(p.id); return { ok: true }; });
 
+route('GET', '/api/pending', () => ({ items: app.pendingCards() }));
+route('GET', '/api/search', (req, res, p, url) => ({ results: app.search(url.searchParams.get('q')) }));
+route('GET', '/api/channels/:ch/export', (req, res, p) => {
+  const { title, text } = app.exportChannel(p.ch);
+  const name = (title.replace(/[^\w .-]+/g, '').trim() || 'chat') + '.md';
+  res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'content-disposition': 'attachment; filename*=UTF-8\'\'' + encodeURIComponent(name), 'cache-control': 'no-store', ...SEC_HEADERS });
+  res.end(text);
+  return undefined;
+});
+route('POST', '/api/channels/:ch/messages/:id/retry', (req, res, p) => app.retryTurn(p.ch, p.id));
+route('POST', '/api/channels/:ch/messages/:id/remember', (req, res, p) => app.rememberMessage(p.ch, p.id));
 route('POST', '/api/tasks/:id/cancel', (req, res, p) => ({ task: app.cancelTask(Number(p.id)) }));
 
 route('GET', '/api/skills/:slug', (req, res, p) => { const s = app.readSkill(p.slug); if (!s) throw httpError(404, 'No such skill'); return s; });

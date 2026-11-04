@@ -6,7 +6,7 @@
   const md = (s) => window.renderMarkdown(s || '');
 
   const S = { config: {}, bots: [], rooms: [], tasks: [], routines: [], pages: [], skills: [], usage: { today: {} }, cli: {} };
-  const V = { ch: null, pane: null, msgs: {}, more: {}, pending: [], dirtyMem: null, sse: null };
+  const V = { ch: null, pane: null, msgs: {}, more: {}, pending: [], dirtyMem: null, sse: null, inbox: [], searchQ: '', results: [] };
 
   const MODELS = [['', 'Default'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
   const PERMS = {
@@ -16,6 +16,24 @@
     readonly: ['Read only', 'Can read, search and use Bullpen tools. Never edits files or runs commands.'],
     full: ['Full access', 'Runs anything without asking. Only for bots you trust in folders you can afford to lose.'],
   };
+  // Starting points for new bots. Everything stays editable.
+  const TEMPLATES = [
+    { key: 'account', label: 'Account manager', avatar: '💼', name: 'Account Manager', title: 'Client account', permission: 'ask',
+      description: 'Owns one client account: knows its history, contacts, systems and open requests, and keeps them moving.',
+      instructions: 'You manage one client account. Keep a running record in memory of the client\'s contacts, systems, preferences, open requests and decisions.\n\nWhen asked for status, lead with what changed, what is blocked, and what needs the user. Draft client emails with draft_message; never send anything yourself. Ask before changing any file you did not create.' },
+    { key: 'research', label: 'Researcher', avatar: '🔎', name: 'Researcher', title: 'Research', permission: 'ask',
+      description: 'Finds and checks facts, compares options, and reports with sources.',
+      instructions: 'Answer with tight bullet points and cite where each fact came from (file path or URL). Say plainly when something is unverified. Prefer primary sources.' },
+    { key: 'writer', label: 'Writer', avatar: '✍️', name: 'Writer', title: 'Writing and email', permission: 'ask',
+      description: 'Turns notes and findings into clear emails, summaries and documents.',
+      instructions: 'Write plainly: short sentences, no filler, lead with the point. Match the requested length exactly. Emails go out as draft cards (draft_message) for the user to send.' },
+    { key: 'analyst', label: 'Analyst', avatar: '📊', name: 'Analyst', title: 'Data and spreadsheets', permission: 'edits',
+      description: 'Works through spreadsheets, CSVs and reports; checks numbers and builds summaries and trackers.',
+      instructions: 'Show the numbers behind every conclusion. Check totals and spot-check rows before reporting. When a result is worth keeping, save it as a page (save_page) with a small table.' },
+    { key: 'inbox', label: 'Inbox triage', avatar: '📥', name: 'Triage', title: 'Incoming work', permission: 'readonly',
+      description: 'Reads what comes in (files, exports, webhook events), sorts it, and routes anything actionable to the right teammate.',
+      instructions: 'For each new item: say what it is, who it is for, and how urgent it is in one line. Hand actionable items to the right teammate with delegate_task. Stay quiet (NO_UPDATE in routines) when nothing needs attention.' },
+  ];
   const COLORS = ['#4f6bed', '#0e9f6e', '#d97706', '#db2777', '#7c3aed', '#0891b2', '#dc2626', '#65a30d', '#475569'];
   const DAYN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -110,7 +128,7 @@
     const [kind, id] = h.split('/');
     if (kind === 'dm' && botById(id)) return 'dm:' + id;
     if (kind === 'room' && roomById(id)) return 'room:' + id;
-    if (kind === 'view' && ['library', 'tasks', 'routines', 'skills', 'memory', 'hidden'].includes(id)) return 'view:' + id;
+    if (kind === 'view' && ['library', 'tasks', 'routines', 'skills', 'memory', 'hidden', 'inbox', 'search'].includes(id)) return 'view:' + id;
     const p = primary();
     return p ? 'dm:' + p.id : 'view:library';
   }
@@ -130,11 +148,13 @@
     const botRow = (b) => '<div class="row' + (V.ch === 'dm:' + b.id ? ' active' : '') + '" data-ch="dm:' + b.id + '" data-bot="' + b.id + '">' +
       botAv(b, '', true) + '<span class="name">' + esc(b.name) + '</span>' + (b.primary ? '<span class="star" title="Primary bot">★</span>' : '') +
       (b.unread ? '<span class="badge">' + b.unread + '</span>' : '') + '</div>';
+    const needs = S.pendingCount || 0;
     let html = '<div class="side-head"><div class="brand"><span class="brand-mark">B</span>Bullpen</div>' +
       '<button class="icon-btn' + (S.config.paused ? ' on' : '') + '" data-act="pause" title="' + (S.config.paused ? 'Resume all bots' : 'Pause all bots') + '">' + (S.config.paused ? '▶' : '⏸') + '</button>' +
       '<button class="icon-btn" data-act="new-bot" title="New bot">＋</button></div>' +
       '<button class="search-btn" data-act="palette">Search or jump to… <kbd>' + (navigator.platform.includes('Mac') ? '⌘K' : 'Ctrl K') + '</kbd></button>' +
-      '<div class="side-scroll">';
+      '<div class="side-scroll">' +
+      '<div class="row' + (V.ch === 'view:inbox' ? ' active' : '') + '" data-ch="view:inbox"><div class="av room-av">' + (needs ? '!' : '✓') + '</div><span class="name">Needs you</span>' + (needs ? '<span class="badge" style="background:var(--warn)">' + needs + '</span>' : '') + '</div>';
     if (p && !p.hidden) html += botRow(p);
     const loose = visibleBots().filter((b) => !b.primary && !b.section);
     html += loose.map(botRow).join('');
@@ -320,6 +340,12 @@
     el.innerHTML = html;
     renderLive();
     if (scroll) el.scrollTop = el.scrollHeight;
+    if (V.flash) {
+      const hit = el.querySelector('[data-id="' + CSS.escape(V.flash) + '"]');
+      if (hit) { hit.scrollIntoView({ block: 'center' }); setTimeout(() => { V.flash = null; }, 2500); }
+      else if (V.more[V.ch]) loadMessages(V.ch, true);
+      else V.flash = null;
+    }
   }
 
   function emptyChat() {
@@ -339,7 +365,10 @@
   function msgHTML(m, prev) {
     const id = ' data-id="' + esc(m.id) + '"';
     const meta = m.meta || {};
-    if (m.role === 'system') return '<div class="msg system' + (meta.error ? ' err' : '') + '"' + id + '><div class="body">' + esc(m.text) + '</div></div>';
+    if (m.role === 'system') {
+      const retry = meta.retry && !meta.retried ? ' <button class="btn sm" data-act="retry">Retry</button>' : '';
+      return '<div class="msg system' + (meta.error ? ' err' : '') + (meta.quiet ? ' quiet' : '') + '"' + id + '><div class="body">' + esc(m.text) + retry + '</div></div>';
+    }
     if (m.role === 'incoming') {
       const from = botById(meta.from);
       const av = from ? botAv(from) : '<div class="av room-av">' + (meta.routineId ? '⏰' : '↘') + '</div>';
@@ -360,7 +389,8 @@
       body += '<details class="steps"><summary>' + meta.steps.length + ' step' + (meta.steps.length === 1 ? '' : 's') + (meta.ms ? ' · ' + Math.max(1, Math.round(meta.ms / 1000)) + 's' : '') +
         (meta.partial ? ' · partial (turn did not finish)' : '') + '</summary><ol>' + meta.steps.map((s) => '<li>' + esc(s) + '</li>').join('') + '</ol></details>';
     }
-    return '<div class="msg ' + m.role + (cont ? ' cont' : '') + (meta.quiet ? ' quiet' : '') + '"' + id + '>' + av + '<div><div class="meta"><b>' + esc(who) + '</b><time>' + fmtTime(m.ts) + '</time></div>' + body + '</div></div>';
+    const tools = m.kind !== 'card' && m.text ? '<span class="msg-tools"><button data-act="copy-msg" title="Copy">⧉</button><button data-act="remember" title="Save to the bot\'s memory">📌</button></span>' : '';
+    return '<div class="msg ' + m.role + (cont ? ' cont' : '') + (meta.quiet ? ' quiet' : '') + (V.flash === m.id ? ' flash' : '') + '"' + id + '>' + av + '<div><div class="meta"><b>' + esc(who) + '</b><time>' + fmtTime(m.ts) + '</time></div>' + body + '</div>' + tools + '</div>';
   }
 
   function cardHTML(m) {
@@ -475,13 +505,14 @@
 
   // card + message actions
   document.addEventListener('click', async (e) => {
-    const a = e.target.closest('#msgs [data-act]');
+    const a = e.target.closest('#msgs [data-act], #inbox [data-act]');
     if (!a) return;
     const msgEl = a.closest('[data-id]');
     const id = msgEl && msgEl.dataset.id;
     const act = a.dataset.act;
-    const m = id && (V.msgs[V.ch] || []).find((x) => x.id === id);
-    const answer = (body) => attempt(() => api('POST', chUrl(V.ch) + '/cards/' + encodeURIComponent(id), body));
+    const ch = (msgEl && msgEl.dataset.ch) || V.ch;
+    const m = id && ((V.msgs[ch] || []).find((x) => x.id === id) || ((V.inbox || []).find((x) => x.msg.id === id) || {}).msg);
+    const answer = async (body) => { const r = await attempt(() => api('POST', chUrl(ch) + '/cards/' + encodeURIComponent(id), body)); if (r && V.ch === 'view:inbox') renderView(); return r; };
     if (act === 'toggle-inc') a.closest('.inc').classList.toggle('open');
     else if (act === 'q-pick') answer({ choices: [a.dataset.val] });
     else if (act === 'q-toggle') a.classList.toggle('sel');
@@ -496,6 +527,9 @@
       const text = (c.subject ? 'Subject: ' + c.subject + '\n\n' : '') + c.body;
       try { await navigator.clipboard.writeText(text); toast('Copied'); } catch { toast('Copy failed — select the text instead', true); }
     } else if (act === 'open-page') openPage(a.dataset.id);
+    else if (act === 'copy-msg' && m) { try { await navigator.clipboard.writeText(m.text || ''); toast('Copied'); } catch { toast('Copy failed', true); } }
+    else if (act === 'remember' && m) { const r = await attempt(() => api('POST', chUrl(ch) + '/messages/' + encodeURIComponent(id) + '/remember')); if (r) toast('Saved to ' + ((botById(r.botId) || {}).name || 'the bot') + '\'s memory'); }
+    else if (act === 'retry') attempt(() => api('POST', chUrl(ch) + '/messages/' + encodeURIComponent(id) + '/retry'));
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.target.matches('#msgs [data-role=q-text]')) {
@@ -655,13 +689,15 @@
       (b.description ? '<p>' + esc(b.description) + '</p>' : '') + '<div class="pane-actions">' +
       '<button class="btn sm" data-p="pause">' + (b.paused ? '▶ Resume' : '⏸ Pause') + '</button>' +
       '<button class="btn sm" data-p="reset" title="Start a fresh Claude session; memory and chat stay">↺ New session</button>' +
-      '<button class="btn sm" data-p="edit">⚙ Settings</button></div></div>';
+      '<button class="btn sm" data-p="edit">⚙ Settings</button><a class="btn sm" href="' + esc(chUrl('dm:' + b.id)) + '/export">⤓ Export chat</a></div></div>';
     h += '<div class="pane-sec"><h5>Status</h5><dl class="kv">' +
       '<dt>Now</dt><dd><span class="pill ' + esc(st.state) + '">' + esc(st.state || 'idle') + '</span> ' + esc(st.state === 'working' || st.state === 'waiting' ? st.activity || '' : '') + '</dd>' +
       '<dt>Model</dt><dd>' + esc(b.model || S.config.defaultModel + ' (default)') + (b.effort ? ' · ' + esc(b.effort) + ' effort' : '') + '</dd>' +
       '<dt>Permissions</dt><dd>' + esc(perm[0]) + '</dd>' +
       '<dt>Folder</dt><dd style="font:12px var(--mono)">' + esc(b.cwd || '(its own workspace)') + '</dd>' +
-      '<dt>Session</dt><dd>' + (b.session && b.session.id ? (b.session.turns || 0) + ' turns · context ' + fmtTokens(b.session.contextTokens) : 'starts on next message') + '</dd>' +
+      '<dt>Session</dt><dd>' + (b.session && b.session.id ? (b.session.turns || 0) + ' turns · context ' + fmtTokens(b.session.contextTokens) + ' of ' + fmtTokens(S.config.sessionMaxTokens) +
+        '<div class="meter"><i style="width:' + Math.min(100, Math.round(100 * (b.session.contextTokens || 0) / (S.config.sessionMaxTokens || 150000))) + '%"></i></div>' : 'starts on next message') + '</dd>' +
+      '<dt>Today</dt><dd>$' + (b.spentToday || 0).toFixed(2) + (b.dailyBudgetUsd ? ' of $' + b.dailyBudgetUsd.toFixed(2) + ' budget' : '') + ' API-equivalent</dd>' +
       '<dt>All time</dt><dd>' + ((b.stats && b.stats.turns) || 0) + ' turns · $' + (((b.stats && b.stats.costUsd) || 0).toFixed(2)) + ' API-equivalent</dd>' +
       (st.queued ? '<dt>Waiting</dt><dd>' + st.queued + ' input(s) <button class="btn sm" data-p="clear">Clear</button></dd>' : '') +
       '</dl></div>';
@@ -716,7 +752,7 @@
 
   // ---------------- full-page views ----------------
   function viewTitle(ch) {
-    return { 'view:library': 'Library', 'view:tasks': 'Tasks', 'view:routines': 'Routines', 'view:skills': 'Skills', 'view:memory': 'Shared memory', 'view:hidden': 'Hidden bots' }[ch] || '';
+    return { 'view:library': 'Library', 'view:tasks': 'Tasks', 'view:routines': 'Routines', 'view:skills': 'Skills', 'view:memory': 'Shared memory', 'view:hidden': 'Hidden bots', 'view:inbox': 'Needs you', 'view:search': 'Search' }[ch] || '';
   }
 
   function renderView() {
@@ -760,6 +796,39 @@
       el.innerHTML = '<p class="lead">Shared memory: facts every bot sees, like your name, time zone, clients and preferences. Each bot also keeps its own memory (in its Details pane).</p>' +
         '<textarea class="mem" id="shared-mem" style="min-height:50vh"></textarea><div style="margin-top:10px"><button class="btn primary" data-v="save-shared">Save</button></div>';
       api('GET', '/api/memory').then((r) => { $('#shared-mem').value = r.text; }).catch(() => {});
+    } else if (v === 'inbox') {
+      el.innerHTML = '<p class="lead">Everything waiting on you, across all bots and chats: approvals, questions, proposed routines and call-ins.</p><div id="inbox"><div class="empty">Loading…</div></div>';
+      api('GET', '/api/pending').then((r) => {
+        V.inbox = r.items;
+        const box = $('#inbox');
+        if (!box) return;
+        box.innerHTML = r.items.length ? r.items.map(({ ch, msg }) => {
+          const where = ch.startsWith('dm:') ? (botById(ch.slice(3)) || {}).name : '# ' + ((roomById(ch.slice(5)) || {}).name || '');
+          const b = botById(msg.botId);
+          return '<div class="msg" data-id="' + esc(msg.id) + '" data-ch="' + esc(ch) + '">' + botAv(b) + '<div><div class="meta"><b>' + esc(b ? b.name : 'Bot') + '</b><time>' + esc(fmtTime(msg.ts)) + '</time>' +
+            '<a href="#' + esc(ch.replace(':', '/')) + '" style="font-size:12px">in ' + esc(where || 'chat') + ' →</a></div>' + cardHTML(msg) + '</div></div>';
+        }).join('') : '<div class="empty"><h3>All clear</h3><p>Nothing is waiting on you.</p></div>';
+      }).catch((e) => toast(e.message, true));
+    } else if (v === 'search') {
+      el.innerHTML = '<div class="view-bar"><input id="search-q" type="search" placeholder="Search every chat…" value="' + esc(V.searchQ) + '" style="flex:1;border:1px solid var(--line-strong);border-radius:8px;padding:8px 11px;background:var(--bg)"></div><div id="search-results"></div>';
+      const q = $('#search-q');
+      const runSearch = async () => {
+        V.searchQ = q.value.trim();
+        const box = $('#search-results');
+        if (V.searchQ.length < 2) { box.innerHTML = '<p class="lead">Type at least two characters.</p>'; return; }
+        const r = await attempt(() => api('GET', '/api/search?q=' + encodeURIComponent(V.searchQ)));
+        if (!r || !$('#search-results')) return;
+        V.results = r.results;
+        box.innerHTML = r.results.length ? r.results.map((h, i) => {
+          const where = h.ch.startsWith('dm:') ? (botById(h.ch.slice(3)) || {}).name : '# ' + ((roomById(h.ch.slice(5)) || {}).name || '');
+          const who = h.role === 'user' ? S.config.userName : (botById(h.botId) || {}).name || h.role;
+          return '<div class="list-item" style="cursor:pointer" data-v="hit" data-id="' + i + '"><div class="grow"><b>' + esc(where || 'chat') + '</b> <small style="display:inline">' + esc(who) + ' · ' + esc(fmtTime(h.ts)) + '</small><div>' + esc(h.snippet) + '</div></div></div>';
+        }).join('') : '<p class="lead">No matches.</p>';
+      };
+      let t = null;
+      q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(runSearch, 250); });
+      q.focus();
+      if (V.searchQ) runSearch();
     } else if (v === 'hidden') {
       const hidden = S.bots.filter((b) => b.hidden);
       el.innerHTML = '<p class="lead">Hidden bots keep working; they\'re just out of the sidebar.</p>' + (hidden.length ? hidden.map((b) => '<div class="list-item">' + botAv(b) + '<div class="grow"><b>' + esc(b.name) + '</b><small>' + esc(b.title) + '</small></div><button class="btn sm" data-v="open-bot" data-id="' + b.id + '">Open</button><button class="btn sm" data-v="unhide" data-id="' + b.id + '">Show in sidebar</button></div>').join('') : '<div class="empty">No hidden bots.</div>');
@@ -783,6 +852,12 @@
     else if (v === 'edit-skill') skillModal(id);
     else if (v === 'save-shared') { const ok = await attempt(() => api('PUT', '/api/memory', { text: $('#shared-mem').value })); if (ok) toast('Shared memory saved'); }
     else if (v === 'open-bot') go('dm:' + id);
+    else if (v === 'hit') {
+      const h = V.results[+id];
+      if (!h) return;
+      V.flash = h.id;
+      go(h.ch);
+    }
     else if (v === 'unhide') attempt(() => api('PATCH', '/api/bots/' + id, { hidden: false }));
   });
 
@@ -823,6 +898,7 @@
       '<div class="tabs"><button class="tab active" data-tab="profile">Profile</button><button class="tab" data-tab="brain">Instructions & model</button><button class="tab" data-tab="access">Folder & permissions</button></div>' +
       '<div class="modal-body">' +
       '<div data-pane="profile">' +
+        (isNew ? '<div class="field"><span>Start from</span><div class="opts" style="display:flex;gap:6px;flex-wrap:wrap">' + TEMPLATES.map((t) => '<button class="btn sm" data-tpl="' + t.key + '">' + esc(t.avatar + ' ' + t.label) + '</button>').join('') + '</div></div>' : '') +
         '<div class="cols3">' + field('Avatar', '<input type="text" name="avatar" maxlength="8" value="' + esc(b.avatar) + '" style="text-align:center;font-size:18px">', 'Emoji or 1–2 letters') +
         field('Name', '<input type="text" name="name" maxlength="60" value="' + esc(b.name) + '" placeholder="e.g. Client Accounts">') +
         field('Title', '<input type="text" name="title" maxlength="80" value="' + esc(b.title) + '" placeholder="e.g. Account manager">') + '</div>' +
@@ -837,6 +913,7 @@
         field('Instructions', '<textarea name="instructions" rows="10" placeholder="Its job, how it should work, what it must never do, what good output looks like.">' + esc(b.instructions) + '</textarea>', 'Changes reach the bot on its next turn.') +
         '<div class="cols">' + field('Model', '<select name="model">' + opts(MODELS.map(([v, l]) => [v, v ? l : 'Default (' + S.config.defaultModel + ')']).concat(b.model && !MODELS.some((m) => m[0] === b.model) ? [[b.model, b.model]] : []), b.model) + '</select>', 'Or type a full model id under Folder & permissions → Advanced.') +
         field('Effort', '<select name="effort">' + opts([['', 'Default'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high'], ['max', 'Max']], b.effort) + '</select>') + '</div>' +
+        field('Daily budget (USD, API-equivalent)', '<input type="number" name="dailyBudgetUsd" min="0" step="0.5" value="' + esc(b.dailyBudgetUsd || '') + '" placeholder="No limit">', 'When reached, the bot\'s work waits until tomorrow. Subscription users: this tracks the API-equivalent cost Claude Code reports.') +
       '</div>' +
       '<div data-pane="access" class="hidden">' +
         field('Working folder', '<input type="text" name="cwd" value="' + esc(b.cwd) + '" placeholder="Leave empty for its own workspace folder" style="font-family:var(--mono)">', 'The folder it works in, e.g. a client\'s folder. Changing it starts a new session.') +
@@ -857,6 +934,15 @@
     permDesc();
     m.querySelector('[name=permission]').addEventListener('change', permDesc);
     m.addEventListener('click', async (e) => {
+      const tp = e.target.closest('[data-tpl]');
+      if (tp) {
+        const t = TEMPLATES.find((x) => x.key === tp.dataset.tpl);
+        const set = (n, v) => { const el = m.querySelector('[name=' + n + ']'); if (el) el.value = v; };
+        set('avatar', t.avatar); set('name', t.name); set('title', t.title); set('description', t.description); set('instructions', t.instructions); set('permission', t.permission);
+        permDesc();
+        $$('[data-tpl]', m).forEach((x) => x.classList.toggle('primary', x === tp));
+        return;
+      }
       const t = e.target.closest('[data-tab]');
       if (t) { $$('.tab', m).forEach((x) => x.classList.toggle('active', x === t)); $$('[data-pane]', m).forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== t.dataset.tab)); return; }
       const sw = e.target.closest('[data-color]');
@@ -870,7 +956,7 @@
         const body = {
           avatar: f('avatar').value.trim() || '🤖', name: f('name').value.trim(), title: f('title').value.trim(), color: f('color').value,
           description: f('description').value.trim(), section: f('section').value.trim(), primary: f('primary').checked, notify: f('notify').checked, hidden: f('hidden').checked,
-          instructions: f('instructions').value, model: f('modelCustom').value.trim() || f('model').value, effort: f('effort').value,
+          instructions: f('instructions').value, model: f('modelCustom').value.trim() || f('model').value, effort: f('effort').value, dailyBudgetUsd: f('dailyBudgetUsd').value,
           cwd: f('cwd').value.trim(), permission: f('permission').value, alwaysAllow: f('alwaysAllow').value, useMyClaudeSettings: f('useMyClaudeSettings').checked, trustFolderSettings: f('trustFolderSettings').checked, mcpServers: f('mcpServers').value,
         };
         if (!body.name) { toast('Give the bot a name', true); return; }
@@ -1061,7 +1147,7 @@
     const acts = [
       ['New bot', () => botModal(null)], ['New group chat', () => roomModal(null)], ['New routine', () => routineModal(null)], ['New skill', () => skillModal(null)],
       ['Open settings', () => settingsModal()], ['Library', () => go('view:library')], ['Tasks', () => go('view:tasks')], ['Routines', () => go('view:routines')],
-      ['Skills', () => go('view:skills')], ['Shared memory', () => go('view:memory')], ['Hidden bots', () => go('view:hidden')],
+      ['Skills', () => go('view:skills')], ['Shared memory', () => go('view:memory')], ['Hidden bots', () => go('view:hidden')], ['Needs you', () => go('view:inbox')], ['Search all chats', () => go('view:search')],
       [S.config.paused ? 'Resume all bots' : 'Pause all bots', () => attempt(() => api('PATCH', '/api/config', { paused: !S.config.paused }))],
     ];
     for (const [label, run] of acts) items.push({ label, sub: 'action', icon: '<div class="av room-av">›</div>', run, q: label });
@@ -1076,6 +1162,7 @@
     const draw = () => {
       const q = input.value.trim().toLowerCase();
       shown = items.filter((it) => !q || it.q.toLowerCase().includes(q)).slice(0, 30);
+      if (q.length >= 2) shown.push({ label: 'Search all chats for "' + input.value.trim() + '"', sub: 'search', icon: '<div class="av room-av">⌕</div>', run: () => { V.searchQ = input.value.trim(); go('view:search'); }, q: '' });
       sel = Math.min(sel, Math.max(0, shown.length - 1));
       res.innerHTML = shown.map((it, i) => '<div class="row' + (i === sel ? ' sel' : '') + '" data-i="' + i + '">' + it.icon + '<span class="name">' + esc(it.label) + '</span><small>' + esc(it.sub) + '</small></div>').join('') || '<div class="row" style="color:var(--muted)">No matches</div>';
     };
@@ -1172,6 +1259,7 @@
       case 'memory': if (V.pane === 'info' && V.dirtyMem !== ev.botId && V.ch === 'dm:' + ev.botId) renderPane(); break;
       case 'config': S.config = ev.config; if (ev.cli) S.cli = ev.cli; applyTheme(); renderSide(); if (isChat(V.ch)) { renderHead(); } { const bn = $('.banner'); const nb = banner(); if (bn) bn.outerHTML = nb || ''; else if (nb) $('#main').insertAdjacentHTML('afterbegin', nb); } break;
       case 'usage': S.usage.today = ev.today; renderSide(); break;
+      case 'pending': S.pendingCount = ev.count; renderSide(); if (V.ch === 'view:inbox') renderView(); break;
       case 'activity': {
         const b = botById(ev.botId);
         if (b && b.status) { b.status.activity = ev.text; if (isChat(V.ch)) { renderHead(); renderLive(); } }

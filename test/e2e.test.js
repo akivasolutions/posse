@@ -543,6 +543,50 @@ test('search, export, remember, retry and daily budget', async () => {
   await T.api('DELETE', '/api/bots/' + flaky.id);
 });
 
+test('folder routines run when files land, and ignore the bot\'s own writes', async () => {
+  const dir = path.join(T.tmp, 'watched');
+  fs.mkdirSync(dir);
+  const bot = (await T.api('POST', '/api/bots', { name: 'Watcher', cwd: dir })).data.bot;
+  const bad = await T.api('POST', '/api/routines', { botId: bot.id, title: 'Nope', instructions: 'x', schedule: { type: 'folder', path: path.join(T.tmp, 'missing') } });
+  assert.strictEqual(bad.status, 400);
+  const r = (await T.api('POST', '/api/routines', { botId: bot.id, title: 'Intake', instructions: 'Handle new files\n@@touch bot-output.txt\n@@reply folder-handled', schedule: { type: 'folder', path: dir }, notify: 'always' })).data;
+  assert.match(r.scheduleText, /When files change in watched/);
+  await new Promise((res) => setTimeout(res, 300));
+  fs.writeFileSync(path.join(dir, 'invoice-17.csv'), 'a,b');
+  fs.writeFileSync(path.join(dir, '.hidden'), 'ignored');
+  const ch = 'dm:' + bot.id;
+  await T.waitFor(async () => (await T.msgs(ch)).some((m) => m.role === 'bot' && m.text === 'folder-handled'), 15000, 'folder routine ran');
+  const inc = (await T.msgs(ch)).find((m) => m.role === 'incoming' && /invoice-17\.csv/.test(m.text));
+  assert.ok(inc, 'payload lists the new file');
+  assert.ok(!/\.hidden/.test(inc.text), 'dotfiles ignored');
+  assert.ok(fs.existsSync(path.join(dir, 'bot-output.txt')));
+  await idle(bot.id);
+  await new Promise((res) => setTimeout(res, 2000));
+  const runs = (await T.api('GET', '/api/state')).data.routines.find((x) => x.id === r.id).runs.length;
+  assert.strictEqual(runs, 1, 'the bot\'s own write did not trigger another run');
+  await T.api('DELETE', '/api/routines/' + r.id);
+  await T.api('DELETE', '/api/bots/' + bot.id);
+});
+
+test('backup downloads the data folder without the access key', async () => {
+  const r = await fetch(T.base + '/api/backup', { headers: T.auth });
+  assert.match(r.headers.get('content-disposition'), /bullpen-backup-.*\.tar\.gz/);
+  const tar = require('zlib').gunzipSync(Buffer.from(await r.arrayBuffer()));
+  const names = [];
+  for (let off = 0; off + 512 <= tar.length;) {
+    const h = tar.subarray(off, off + 512);
+    if (h.every((b) => b === 0)) break;
+    const name = h.subarray(0, 100).toString().replace(/\0.*$/s, '');
+    const prefix = h.subarray(345, 500).toString().replace(/\0.*$/s, '');
+    const size = parseInt(h.subarray(124, 136).toString().replace(/\0.*$/s, '').trim(), 8);
+    names.push(prefix ? prefix + '/' + name : name);
+    off += 512 + Math.ceil(size / 512) * 512;
+  }
+  assert.ok(names.includes('bullpen/config.json'));
+  assert.ok(names.some((n) => n.startsWith('bullpen/channels/')));
+  assert.ok(!names.some((n) => /secret\.json/.test(n)), 'access key not in the backup');
+});
+
 test('security settings: key rotation, webhook rate limit, audit of settings changes', async () => {
   const before = (await T.api('GET', '/api/security')).data;
   assert.ok(before.accessKey && before.openUrl.includes('?key='));

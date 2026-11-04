@@ -110,6 +110,8 @@ async function main() {
       const r = await mcp.rpc('tools/call', { name: pt.replace(/^mcp__bullpen__/, ''), arguments: { tool_name: m[1], input: toolInput, tool_use_id: 'x' } });
       const decision = JSON.parse(r.result.content[0].text);
       notes.push('perm ' + m[1] + ' -> ' + decision.behavior);
+    } else if ((m = /^@@touch\s+(.+)$/.exec(line))) {
+      fs.writeFileSync(path.resolve(process.cwd(), m[1].trim()), 'written by the bot');
     } else if ((m = /^@@sleep\s+(\d+)/.exec(line))) {
       await new Promise((res) => setTimeout(res, +m[1]));
     } else if ((m = /^@@fail\s*(.*)$/.exec(line))) {

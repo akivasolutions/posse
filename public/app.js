@@ -782,7 +782,8 @@
           const b = botById(r.botId);
           const last = r.runs && r.runs[0];
           return '<tr><td><b>' + esc(r.title) + '</b><br><small style="color:var(--muted)">' + esc((r.instructions || '').slice(0, 140)) + '</small>' +
-            (r.webhook ? '<br><small>Webhook: <code style="font:11px var(--mono)">POST ' + esc(r.webhook) + '</code></small>' : '') + '</td>' +
+            (r.webhook ? '<br><small>Webhook: <code style="font:11px var(--mono)">POST ' + esc(r.webhook) + '</code></small>' : '') +
+            (r.schedule.type === 'folder' ? '<br><small style="font:11px var(--mono)">' + esc(r.schedule.path) + '</small>' + (r.watchError ? '<br><small style="color:var(--bad)">Can\'t watch: ' + esc(r.watchError) + '</small>' : '') : '') + '</td>' +
             '<td>' + esc(b ? b.name : '?') + '</td><td>' + esc(r.scheduleText) + '<br><span class="pill ' + (r.pendingApproval ? 'waiting' : r.enabled ? 'on' : 'paused') + '">' + (r.pendingApproval ? 'awaiting approval' : r.enabled ? 'on' : 'paused') + '</span></td>' +
             '<td>' + (r.nextRunAt ? 'Next ' + esc(fmtTime(r.nextRunAt)) : '—') + (last ? '<br><small style="color:var(--muted)">Last ' + esc(fmtTime(last.ts)) + ' · ' + esc(last.status) + '</small>' : '') +
             (r.runs && r.runs.length ? '<details><summary><small>History</small></summary>' + r.runs.map((x) => '<div><small>' + esc(fmtTime(x.ts)) + ' · ' + esc(x.status) + ' — ' + esc(x.summary) + '</small></div>').join('') + '</details>' : '') + '</td>' +
@@ -1016,12 +1017,13 @@
     const m = modal('<div class="modal-head"><h3>' + (isNew ? 'New routine' : 'Edit routine') + '</h3><button class="icon-btn" data-m="x">✕</button></div><div class="modal-body">' +
       '<div class="cols">' + field('Bot', '<select name="botId">' + opts(S.bots.map((b) => [b.id, b.name]), r.botId) + '</select>') + field('Name', '<input type="text" name="title" maxlength="80" value="' + esc(r.title) + '" placeholder="e.g. Morning client check">') + '</div>' +
       field('Instructions', '<textarea name="instructions" rows="5" placeholder="What the bot should do each time it runs.">' + esc(r.instructions) + '</textarea>') +
-      '<div class="cols">' + field('When', '<select name="type">' + opts([['daily', 'Daily at a time'], ['interval', 'Every N minutes'], ['once', 'Once'], ['webhook', 'When a webhook is called']], s.type) + '</select>') +
+      '<div class="cols">' + field('When', '<select name="type">' + opts([['daily', 'Daily at a time'], ['interval', 'Every N minutes'], ['once', 'Once'], ['folder', 'When files change in a folder'], ['webhook', 'When a webhook is called']], s.type) + '</select>') +
       field('Messages', '<select name="notify">' + opts([['smart', 'Only when worth seeing'], ['always', 'Every run']], r.notify) + '</select>') + '</div>' +
       '<div data-s="daily"><div class="cols">' + field('Time', '<input type="time" name="time" value="' + esc(s.time || '08:30') + '">') +
       field('Days', '<div class="days">' + DAYN.map((d, i) => '<label><input type="checkbox" value="' + i + '"' + ((s.days || [1, 2, 3, 4, 5]).includes(i) ? ' checked' : '') + '>' + d + '</label>').join('') + '</div>') + '</div></div>' +
       '<div data-s="interval">' + field('Every (minutes)', '<input type="number" name="minutes" min="15" value="' + esc(s.minutes || 60) + '">', 'At least 15.') + '</div>' +
       '<div data-s="once">' + field('Date and time', '<input type="datetime-local" name="at" value="' + esc(at) + '">') + '</div>' +
+      '<div data-s="folder">' + field('Folder', '<input type="text" name="path" value="' + esc(s.path || '') + '" placeholder="e.g. C:\\Clients\\Acme\\Inbox" style="font-family:var(--mono)">', 'Runs about 20 seconds after files stop changing, with the list of changed files. At most every 2 minutes, 40 times a day. Changes the bot makes itself during the run are ignored.') + '</div>' +
       '<div data-s="webhook"><div class="note">After saving, the Routines page shows this routine\'s webhook URL. Anything POSTed to it is handed to the bot as the event payload. It only listens on this computer unless you start Bullpen with --host.</div></div>' +
       '</div><div class="modal-foot"><span class="grow"></span><button class="btn" data-m="x">Cancel</button><button class="btn primary" data-m="ok">' + (isNew ? 'Create' : 'Save') + '</button></div>');
     const sync = () => { const t = m.querySelector('[name=type]').value; $$('[data-s]', m).forEach((d) => d.classList.toggle('hidden', d.dataset.s !== t)); };
@@ -1037,6 +1039,7 @@
       if (type === 'daily') { schedule.time = g('time'); schedule.days = $$('.days input:checked', m).map((x) => +x.value); }
       if (type === 'interval') schedule.minutes = +g('minutes');
       if (type === 'once') schedule.at = g('at');
+      if (type === 'folder') schedule.path = g('path').trim();
       const body = { botId: g('botId'), title: g('title').trim() || 'Routine', instructions: g('instructions'), notify: g('notify'), schedule };
       const res = await attempt(() => (isNew ? api('POST', '/api/routines', body) : api('PATCH', '/api/routines/' + r.id, body)));
       if (res) closeModal();
@@ -1099,6 +1102,7 @@
       '</div>' +
       '<div data-pane="about" class="hidden"><p><b>Bullpen</b> — a local team of persistent AI bots, powered by the Claude Code CLI. Open source, MIT license.</p>' +
         '<dl class="kv"><dt>Data folder</dt><dd style="font:12px var(--mono)">' + esc(S.dataDir) + '</dd><dt>Today</dt><dd>' + (S.usage.today.turns || 0) + ' turns · $' + (S.usage.today.costUsd || 0).toFixed(2) + ' API-equivalent</dd></dl>' +
+        '<p><a class="btn sm" href="/api/backup">⤓ Download backup (.tar.gz)</a></p>' +
         '<p style="color:var(--muted);font-size:12.5px">Everything (chats, memory, pages, routines) is plain files in the data folder. Back it up like any folder. Keyboard: ⌘/Ctrl+K search · ⌘/Ctrl+Shift+I details · ⌘/Ctrl+, settings.</p></div>' +
       '</div><div class="modal-foot"><span class="grow"></span><button class="btn" data-m="x">Close</button><button class="btn primary" data-m="save">Save</button></div>', { wide: true });
     let sec = null;

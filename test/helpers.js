@@ -15,7 +15,7 @@ async function startServer() {
   const port = await freePort();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bullpen-test-'));
   const fake = path.join(__dirname, process.platform === 'win32' ? 'fake-claude.cmd' : 'fake-claude.js');
-  const env = { ...process.env, CLAUDE_BIN: fake, FAKE_CLAUDE_DIR: path.join(tmp, 'fake') };
+  const env = { ...process.env, CLAUDE_BIN: fake, FAKE_CLAUDE_DIR: path.join(tmp, 'fake'), BULLPEN_FOLDER_QUIET_MS: '400', BULLPEN_FOLDER_GAP_MS: '600' };
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--port', String(port), '--data', path.join(tmp, 'data')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = '';
   child.stdout.on('data', (c) => { log += c; });

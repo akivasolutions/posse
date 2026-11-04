@@ -313,3 +313,8 @@ textarea.mem { width: 100%; min-height: 140px; border: 1px solid var(--line-stro
 .banner { background: color-mix(in srgb, var(--warn) 12%, var(--bg)); border-bottom: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line)); padding: 8px 18px; font-size: 13px; display: flex; gap: 10px; align-items: center; }
 .banner.err { background: color-mix(in srgb, var(--bad) 10%, var(--bg)); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
 .banner .grow { flex: 1; }
+
+/* Light on resources: no motion for people who ask for less, and nothing animates in the background. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

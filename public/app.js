@@ -6,11 +6,11 @@
   const md = (s) => window.renderMarkdown(s || '');
 
   const S = { config: {}, bots: [], rooms: [], tasks: [], routines: [], pages: [], skills: [], usage: { today: {} }, cli: {} };
-  const V = { ch: null, pane: null, msgs: {}, more: {}, pending: [], dirtyMem: false, sse: null };
+  const V = { ch: null, pane: null, msgs: {}, more: {}, pending: [], dirtyMem: null, sse: null };
 
   const MODELS = [['', 'Default'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
   const PERMS = {
-    ask: ['Ask me', 'Reads and searches freely. Edits, commands and anything else show you an approval card first.'],
+    ask: ['Ask me', 'Reads its own working folder freely. Edits, commands, web pages and files elsewhere show you an approval card first.'],
     edits: ['Auto-edit', 'Edits files in its folder without asking. Commands still need your approval.'],
     auto: ['Auto-review', 'Claude Code\'s safety classifier approves routine actions and blocks risky ones (needs a recent Claude Code).'],
     readonly: ['Read only', 'Can read, search and use Bullpen tools. Never edits files or runs commands.'],
@@ -24,6 +24,7 @@
     const opts = { method, headers: { 'X-Bullpen': '1' } };
     if (body !== undefined) { opts.headers['content-type'] = 'application/json'; opts.body = JSON.stringify(body); }
     const r = await fetch(url, opts);
+    if (r.status === 401) { location.href = '/login'; throw new Error('Sign in required'); }
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
     return data;
@@ -612,7 +613,7 @@
       if (pane.dataset.page === src) return;
       pane.dataset.page = src;
       pane.innerHTML = '<div class="pane-head"><b>▤ ' + esc(p.title) + '</b><a class="btn sm" target="_blank" href="/pages/' + esc(p.id) + '">New tab ↗</a><button class="icon-btn" data-p="close">✕</button></div>' +
-        '<iframe class="page-frame" sandbox="allow-scripts allow-popups allow-forms allow-modals allow-downloads" src="' + esc(src) + '"></iframe>';
+        '<iframe class="page-frame" sandbox="allow-scripts allow-modals allow-downloads" referrerpolicy="no-referrer" src="' + esc(src) + '"></iframe>';
       return;
     }
     delete pane.dataset.page;
@@ -622,7 +623,9 @@
 
   function renderBotPane(pane, b) {
     if (!b) return;
-    const keepMem = V.dirtyMem && $('#mem-text') ? $('#mem-text').value : null;
+    // Unsaved memory edits survive a re-render of the same bot's pane, never another bot's.
+    const keepMem = V.dirtyMem === b.id && $('#mem-text') ? $('#mem-text').value : null;
+    if (V.dirtyMem && V.dirtyMem !== b.id) V.dirtyMem = null;
     const st = b.status || {};
     const perm = PERMS[b.permission || S.config.defaultPermission] || PERMS.ask;
     const routines = S.routines.filter((r) => r.botId === b.id);
@@ -655,8 +658,8 @@
     pane.innerHTML = h;
     const ta = $('#mem-text');
     if (keepMem != null) ta.value = keepMem;
-    else api('GET', '/api/bots/' + b.id + '/memory').then((r) => { if (!V.dirtyMem) ta.value = r.text; }).catch(() => {});
-    ta.addEventListener('input', () => { V.dirtyMem = true; });
+    else api('GET', '/api/bots/' + b.id + '/memory').then((r) => { if (V.dirtyMem !== b.id && ta.isConnected) ta.value = r.text; }).catch(() => {});
+    ta.addEventListener('input', () => { V.dirtyMem = b.id; });
   }
 
   function renderRoomPane(pane, r) {
@@ -677,14 +680,14 @@
     const p = a.dataset.p;
     const b = V.ch && V.ch.startsWith('dm:') ? botById(V.ch.slice(3)) : null;
     const r = V.ch && V.ch.startsWith('room:') ? roomById(V.ch.slice(5)) : null;
-    if (p === 'close') { V.pane = null; renderPane(); }
+    if (p === 'close') { V.pane = null; V.dirtyMem = null; renderPane(); }
     else if (p === 'edit' && b) botModal(b);
     else if (p === 'pause' && b) attempt(() => api('PATCH', '/api/bots/' + b.id, { paused: !b.paused }));
     else if (p === 'reset' && b) {
       if (await confirmBox('Start a fresh session for ' + b.name + '?', 'The bot keeps its memory and this chat history. Its Claude context starts over, with a recap of the recent chat on the next turn. Use this when it seems confused or its context is very large.', 'New session', false)) attempt(() => api('POST', '/api/bots/' + b.id + '/reset-session'));
     } else if (p === 'clear' && b) attempt(() => api('POST', '/api/bots/' + b.id + '/clear-queue'));
     else if (p === 'add-routine' && b) routineModal(null, b.id);
-    else if (p === 'save-mem' && b) { const ok = await attempt(() => api('PUT', '/api/bots/' + b.id + '/memory', { text: $('#mem-text').value })); if (ok) { V.dirtyMem = false; toast('Memory saved'); } }
+    else if (p === 'save-mem' && b) { const ok = await attempt(() => api('PUT', '/api/bots/' + b.id + '/memory', { text: $('#mem-text').value })); if (ok) { V.dirtyMem = null; toast('Memory saved'); } }
     else if (p === 'edit-room' && r) roomModal(r);
     else if (p === 'del-room' && r) deleteRoom(r);
     else if (p === 'rm-member' && r) attempt(() => api('PATCH', '/api/rooms/' + r.id, { members: r.members.filter((m) => m !== a.dataset.id) }));
@@ -821,8 +824,10 @@
         field('Always allowed', '<textarea name="alwaysAllow" rows="3" style="font-family:var(--mono);font-size:12px" placeholder="One rule per line, e.g. Bash(git status) or Edit">' + esc((b.alwaysAllow || []).join('\n')) + '</textarea>', 'Claude Code permission rules. "Always allow" on an approval card adds one here.') +
         '<details><summary style="cursor:pointer;color:var(--muted)">Advanced</summary><div style="margin-top:10px">' +
         field('Custom model id', '<input type="text" name="modelCustom" value="' + esc(MODELS.some((m) => m[0] === b.model) ? '' : b.model) + '" placeholder="Overrides the model picker, e.g. claude-opus-5-5" style="font-family:var(--mono)">') +
+        '<label class="field inline"><input type="checkbox" name="trustFolderSettings"' + (b.trustFolderSettings ? ' checked' : '') + '><span>Trust this folder\'s Claude Code settings</span></label>' +
+        '<small style="display:block;color:var(--muted);margin:-8px 0 12px">Off (recommended): permission rules saved inside the working folder (.claude/settings*.json) are ignored, so a folder can\'t pre-approve commands. Turn on only for folders you control.</small>' +
         '<label class="field inline"><input type="checkbox" name="useMyClaudeSettings"' + (b.useMyClaudeSettings ? ' checked' : '') + '><span>Use my Claude Code settings and connectors</span></label>' +
-        '<small style="display:block;color:var(--muted);margin:-8px 0 12px">Off (recommended): the bot gets only Bullpen tools plus the servers below, and your personal allow-rules don\'t apply to it. On: it also loads your user settings and every MCP connector you have set up.</small>' +
+        '<small style="display:block;color:var(--muted);margin:-8px 0 12px">Off (recommended): the bot gets only Bullpen tools plus the servers below, and your personal allow-rules don\'t apply to it. On: it also loads all your settings and every MCP connector you have set up.</small>' +
         field('Extra MCP servers (JSON)', '<textarea name="mcpServers" rows="5" style="font-family:var(--mono);font-size:12px" placeholder=\'{"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]}}\'>' + esc(Object.keys(b.mcpServers || {}).length ? JSON.stringify(b.mcpServers, null, 2) : '') + '</textarea>', 'Connectors for this bot only, in Claude Code\'s mcpServers format.') +
         '</div></details>' +
       '</div>' +
@@ -846,7 +851,7 @@
           avatar: f('avatar').value.trim() || '🤖', name: f('name').value.trim(), title: f('title').value.trim(), color: f('color').value,
           description: f('description').value.trim(), section: f('section').value.trim(), primary: f('primary').checked, notify: f('notify').checked, hidden: f('hidden').checked,
           instructions: f('instructions').value, model: f('modelCustom').value.trim() || f('model').value, effort: f('effort').value,
-          cwd: f('cwd').value.trim(), permission: f('permission').value, alwaysAllow: f('alwaysAllow').value, useMyClaudeSettings: f('useMyClaudeSettings').checked, mcpServers: f('mcpServers').value,
+          cwd: f('cwd').value.trim(), permission: f('permission').value, alwaysAllow: f('alwaysAllow').value, useMyClaudeSettings: f('useMyClaudeSettings').checked, trustFolderSettings: f('trustFolderSettings').checked, mcpServers: f('mcpServers').value,
         };
         if (!body.name) { toast('Give the bot a name', true); return; }
         if (body.permission === 'full' && b.permission !== 'full' && !(await confirmBox('Give ' + body.name + ' full access?', 'It will run any command and edit any file it can reach without asking you. Only do this for a bot working in a folder you can afford to lose.', 'Give full access'))) return;
@@ -899,7 +904,9 @@
     const isNew = !r;
     r = r || { botId: botId || (primary() || {}).id, title: '', instructions: '', schedule: { type: 'daily', time: '08:30', days: [1, 2, 3, 4, 5] }, notify: 'smart' };
     const s = r.schedule;
-    const at = s.at || new Date(Date.now() + 3600e3).toISOString().slice(0, 16);
+    const soon = new Date(Date.now() + 3600e3);
+    const p2 = (n) => String(n).padStart(2, '0');
+    const at = s.at || soon.getFullYear() + '-' + p2(soon.getMonth() + 1) + '-' + p2(soon.getDate()) + 'T' + p2(soon.getHours()) + ':' + p2(soon.getMinutes());
     const m = modal('<div class="modal-head"><h3>' + (isNew ? 'New routine' : 'Edit routine') + '</h3><button class="icon-btn" data-m="x">✕</button></div><div class="modal-body">' +
       '<div class="cols">' + field('Bot', '<select name="botId">' + opts(S.bots.map((b) => [b.id, b.name]), r.botId) + '</select>') + field('Name', '<input type="text" name="title" maxlength="80" value="' + esc(r.title) + '" placeholder="e.g. Morning client check">') + '</div>' +
       field('Instructions', '<textarea name="instructions" rows="5" placeholder="What the bot should do each time it runs.">' + esc(r.instructions) + '</textarea>') +
@@ -963,6 +970,7 @@
         field('Claude Code path', '<input type="text" name="claudePath" value="' + esc(c.claudePath) + '" placeholder="Auto-detect" style="font-family:var(--mono)">', 'Leave empty to find it automatically. Bots use your Claude Code login.') +
         '<div class="cols">' + field('Default model', '<input type="text" name="defaultModel" value="' + esc(c.defaultModel) + '" list="model-list"><datalist id="model-list"><option value="opus"><option value="sonnet"><option value="haiku"><option value="fable"></datalist>', 'An alias (opus, sonnet, haiku, fable) or a full model id.') +
         field('Default permissions', '<select name="defaultPermission">' + opts(Object.entries(PERMS).map(([k, v]) => [k, v[0]]), c.defaultPermission) + '</select>') + '</div>' +
+        field('Tool connection', '<select name="mcpTransport">' + opts([['http', 'Built in (lighter, recommended)'], ['stdio', 'Separate helper process (compatibility)']], c.mcpTransport) + '</select>', 'How bots reach Bullpen\'s tools. Switch only if an older Claude Code can\'t connect.') +
       '</div>' +
       '<div data-pane="limits" class="hidden"><div class="note">Bots that talk to bots can loop. These limits keep usage in check. A bot that fails 3 turns in a row is paused.</div><div class="cols">' +
         lim('maxConcurrent', 'Bots working at once', 'Each bot still runs one turn at a time.', 1, 8) +
@@ -973,6 +981,7 @@
         lim('maxToolTurns', 'Max steps per turn', 'Tool calls in one turn before it stops.', 5, 500) +
         lim('turnTimeoutMin', 'Turn time limit (minutes)', '', 2, 240) +
         lim('approvalTimeoutMin', 'Approval wait (minutes)', 'Unanswered approval cards are declined after this.', 1, 720) +
+        lim('sessionMaxTokens', 'Session size before refresh (tokens)', 'When a bot\'s context passes this, it saves notes to memory and starts a fresh session.', 50000, 1000000) +
       '</div></div>' +
       '<div data-pane="about" class="hidden"><p><b>Bullpen</b> — a local team of persistent AI bots, powered by the Claude Code CLI. Open source, MIT license.</p>' +
         '<dl class="kv"><dt>Data folder</dt><dd style="font:12px var(--mono)">' + esc(S.dataDir) + '</dd><dt>Today</dt><dd>' + (S.usage.today.turns || 0) + ' turns · $' + (S.usage.today.costUsd || 0).toFixed(2) + ' API-equivalent</dd></dl>' +
@@ -1100,7 +1109,7 @@
         if (ev.ch === V.ch && !document.hidden) api('POST', chUrl(ev.ch) + '/read').catch(() => {});
         if (['bot', 'incoming'].includes(ev.msg.role)) notify(ev.ch, ev.msg);
         break;
-      case 'message:update': if (V.msgs[ev.ch]) upsertMessage(ev.ch, ev.msg); break;
+      case 'message:update': if (V.msgs[ev.ch] && V.msgs[ev.ch].some((m) => m.id === ev.msg.id)) upsertMessage(ev.ch, ev.msg); break;
       case 'task':
         upsert(S.tasks, ev.task);
         S.tasks.sort((a, b) => b.id - a.id);
@@ -1116,7 +1125,7 @@
       case 'page': upsert(S.pages, ev.page); S.pages.sort((a, b) => b.updatedAt - a.updatedAt); if (V.ch === 'view:library') renderView(); if (V.pane === 'page:' + ev.page.id) renderPane(); break;
       case 'page:removed': S.pages = S.pages.filter((p) => p.id !== ev.id); if (V.ch === 'view:library') renderView(); if (V.pane === 'page:' + ev.id) { V.pane = null; renderPane(); } break;
       case 'skills': S.skills = ev.skills; if (V.ch === 'view:skills') renderView(); break;
-      case 'memory': if (V.pane === 'info' && !V.dirtyMem && V.ch === 'dm:' + ev.botId) renderPane(); break;
+      case 'memory': if (V.pane === 'info' && V.dirtyMem !== ev.botId && V.ch === 'dm:' + ev.botId) renderPane(); break;
       case 'config': S.config = ev.config; if (ev.cli) S.cli = ev.cli; applyTheme(); renderSide(); if (isChat(V.ch)) { renderHead(); } { const bn = $('.banner'); const nb = banner(); if (bn) bn.outerHTML = nb || ''; else if (nb) $('#main').insertAdjacentHTML('afterbegin', nb); } break;
       case 'usage': S.usage.today = ev.today; renderSide(); break;
       case 'activity': {

@@ -9,6 +9,8 @@
 //   @@perm <Tool> <json>     ask the --permission-prompt-tool for approval
 //   @@sleep <ms>             wait (to test Stop)
 //   @@fail <message>         end the turn with an error
+//   @@as <handle> <directive>  run the directive only when this bot's handle matches
+//   @@ctx <tokens>           report this context size in usage
 //   @@reply <text>           final reply text (default: "ok: <first line of input>"); {AT} becomes @
 const fs = require('fs');
 const os = require('os');
@@ -20,13 +22,15 @@ if (argv.includes('--version')) { console.log('9.9.9 (Fake Claude)'); process.ex
 if (argv.includes('--help')) {
   console.log(['-p', '--output-format', '--verbose', '--model', '--effort', '--session-id', '--resume', '--append-system-prompt',
     '--append-system-prompt-file', '--mcp-config', '--strict-mcp-config', '--setting-sources', '--max-turns', '--add-dir',
-    '--permission-mode', '--allowedTools', '--disallowedTools', '--permission-prompt-tool', '--dangerously-skip-permissions'].join('\n'));
+    '--permission-mode', '--allowedTools', '--disallowedTools', '--permission-prompt-tool', '--dangerously-skip-permissions', '--settings'].join('\n'));
   process.exit(0);
 }
 const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 const dir = process.env.FAKE_CLAUDE_DIR || path.join(os.tmpdir(), 'fake-claude');
 fs.mkdirSync(dir, { recursive: true });
-fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ argv, cwd: process.cwd() }) + '\n');
+let flagSettings = null;
+try { if (opt('--settings')) flagSettings = JSON.parse(fs.readFileSync(opt('--settings'), 'utf8')); } catch {}
+fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ argv, cwd: process.cwd(), settings: flagSettings }) + '\n');
 
 const out = (ev) => process.stdout.write(JSON.stringify(ev) + '\n');
 
@@ -38,6 +42,15 @@ process.stdin.on('end', () => main().catch((e) => { process.stderr.write(String(
 function startMcp(cfgPath) {
   const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
   const s = cfg.mcpServers.bullpen;
+  fs.appendFileSync(path.join(dir, 'transports.log'), (s.type || 'stdio') + '\n');
+  if (s.type === 'http') {
+    let seq = 0;
+    const rpc = async (method, params) => {
+      const r = await fetch(s.url, { method: 'POST', headers: { ...s.headers, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++seq, method, params }) });
+      return r.json();
+    };
+    return { rpc, close: () => {} };
+  }
   const child = spawn(s.command, s.args, { env: { ...process.env, ...(s.env || {}) }, stdio: ['pipe', 'pipe', 'inherit'] });
   let buf = '';
   let seq = 0;
@@ -72,10 +85,16 @@ async function main() {
   if (mcp) { await mcp.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake', version: '0' } }); await mcp.rpc('tools/list', {}); }
 
   let reply = null;
+  let ctx = 1010;
   const notes = [];
-  for (const raw of input.split('\n')) {
-    const line = raw.trim();
+  let me = '';
+  try { const sp = fs.readFileSync(opt('--append-system-prompt-file'), 'utf8'); const hm = /\(handle @([\w-]+)\)/.exec(sp); if (hm) me = hm[1]; } catch {}
+  for (const raw0 of input.split('\n')) {
+    let line = raw0.trim();
     let m;
+    const as = /^@@as\s+([\w-]+)\s+(.*)$/.exec(line);
+    if (as) { if (as[1] !== me) continue; line = '@@' + as[2]; }
+    if ((m = /^@@ctx\s+(\d+)/.exec(line))) { ctx = +m[1]; continue; }
     if ((m = /^@@call\s+(\w+)\s*(.*)$/.exec(line))) {
       const args = m[2] ? JSON.parse(m[2]) : {};
       out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't' + Date.now(), name: 'mcp__bullpen__' + m[1], input: args }] } });
@@ -107,5 +126,5 @@ async function main() {
   history.push({ in: input, out: text });
   fs.writeFileSync(sessFile(sid), JSON.stringify({ history }));
   out({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
-  out({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: sid, num_turns: 1, total_cost_usd: 0.001, usage: { input_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0, output_tokens: 5, iterations: [{ input_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 }] } });
+  out({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: sid, num_turns: 1, total_cost_usd: 0.001, usage: { input_tokens: 10, cache_read_input_tokens: ctx - 10, cache_creation_input_tokens: 0, output_tokens: 5, iterations: [{ input_tokens: 10, cache_read_input_tokens: ctx - 10, cache_creation_input_tokens: 0 }] } });
 }

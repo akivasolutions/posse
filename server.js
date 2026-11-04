@@ -19,7 +19,8 @@ function arg(name, dflt) {
 
 const PORT = parseInt(arg('port', '4747'), 10);
 const HOST = arg('host', '127.0.0.1');
-const DATA = path.resolve(arg('data', path.join(__dirname, 'data')));
+// Default data folder is per-user (~/.bullpen), so other accounts on a shared machine can't read it.
+const DATA = path.resolve(arg('data', path.join(os.homedir(), '.bullpen')));
 const PUBLIC = path.join(__dirname, 'public');
 const BASE = 'http://127.0.0.1:' + PORT;
 
@@ -32,14 +33,75 @@ const MIME = {
 
 const app = new App({ dataDir: DATA, baseUrl: BASE });
 
+// ---------------- access key ----------------
+// Bullpen listens on loopback, but on a shared machine other accounts can reach loopback too.
+// Every request needs the access key: as an HttpOnly cookie set by the sign-in page or by
+// opening /?key=…, or as "Authorization: Bearer <key>" for scripts.
+const crypto = require('crypto');
+const SECRET_FILE = 'secret.json';
+let secret = app.store.readJSON(SECRET_FILE, null);
+if (!secret || !secret.accessKey || !secret.cookie) {
+  secret = { accessKey: crypto.randomBytes(18).toString('base64url'), cookie: crypto.randomBytes(32).toString('base64url') };
+  app.store.writeJSON(SECRET_FILE, secret);
+}
+const COOKIE = 'bp_session';
+const OPEN_URL = BASE + '/?key=' + encodeURIComponent(secret.accessKey);
+function same(a, b) {
+  const x = Buffer.from(String(a || '')); const y = Buffer.from(String(b || ''));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+function cookieOf(req) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === COOKIE) return part.slice(i + 1).trim();
+  }
+  return '';
+}
+function authed(req) {
+  const h = String(req.headers.authorization || '');
+  return same(cookieOf(req), secret.cookie) || (h.startsWith('Bearer ') && same(h.slice(7), secret.accessKey));
+}
+function setSession(res, location) {
+  res.writeHead(302, { location, 'set-cookie': COOKIE + '=' + secret.cookie + '; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000', 'cache-control': 'no-store', ...SEC_HEADERS });
+  res.end();
+}
+const loginFails = [];
+function loginLimited() {
+  const now = Date.now();
+  while (loginFails.length && now - loginFails[0] > 10 * 60e3) loginFails.shift();
+  return loginFails.length >= 10;
+}
+function loginPage(msg) {
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bullpen — sign in</title>' +
+    '<style>body{font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:#f3f4f7;color:#1c1f24;display:grid;place-items:center;min-height:100vh;margin:0}' +
+    'form{background:#fff;padding:28px;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.1);width:min(380px,90vw)}h1{font-size:18px;margin:0 0 6px}p{color:#5b6370;font-size:13.5px;margin:0 0 14px}' +
+    'input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cfd4dc;border-radius:8px;font:inherit;margin-bottom:12px}button{width:100%;padding:9px;border:0;border-radius:8px;background:#4f6bed;color:#fff;font:inherit;font-weight:600;cursor:pointer}' +
+    '.err{color:#d23b3b}@media (prefers-color-scheme:dark){body{background:#121417;color:#e7e9ed}form{background:#1d2025}input{background:#17191d;color:#e7e9ed;border-color:#3a3f48}p{color:#9aa1ad}}</style></head>' +
+    '<body><form method="post" action="/login"><h1>Bullpen</h1><p>Enter the access key. It\'s printed in the window where Bullpen is running, and saved in <code>secret.json</code> in your data folder.</p>' +
+    (msg ? '<p class="err">' + msg + '</p>' : '') + '<input name="key" type="password" autocomplete="current-password" autofocus placeholder="Access key"><button>Sign in</button></form></body></html>';
+}
+
 // ---------------- helpers ----------------
+const SEC_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'cross-origin-opener-policy': 'same-origin',
+  'cross-origin-resource-policy': 'same-origin',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+};
+// The app itself: only its own scripts, no remote images (a misled bot can't leak data through an
+// image URL), no framing by other sites.
+const APP_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'";
+
 function send(res, status, body, headers = {}) {
   const isBuf = Buffer.isBuffer(body);
   const data = isBuf || typeof body === 'string' ? body : JSON.stringify(body);
   res.writeHead(status, {
     'content-type': isBuf || typeof body === 'string' ? (headers['content-type'] || 'text/plain; charset=utf-8') : 'application/json; charset=utf-8',
     'cache-control': 'no-store',
-    'x-content-type-options': 'nosniff',
+    'content-security-policy': APP_CSP,
+    'x-frame-options': 'DENY',
+    ...SEC_HEADERS,
     ...headers,
   });
   res.end(data);
@@ -59,8 +121,8 @@ function readBody(req, limit = 2e6) {
   });
 }
 
-async function json(req) {
-  const buf = await readBody(req);
+async function json(req, limit = 2e6) {
+  const buf = await readBody(req, limit);
   if (!buf.length) return {};
   try { return JSON.parse(buf.toString('utf8')); } catch { throw httpError(400, 'Invalid JSON'); }
 }
@@ -81,7 +143,9 @@ function serveStatic(res, file) {
   });
 }
 
-const PAGE_CSP = "sandbox allow-scripts allow-popups allow-forms allow-modals allow-downloads; default-src 'none'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src data: blob: 'self'; font-src data:; media-src data: blob:";
+// Bot-made pages run scripts but can't reach the network, Bullpen's API, navigate away, open
+// windows or submit forms, so a page can't carry data out even if a bot was misled.
+const PAGE_CSP = "sandbox allow-scripts allow-modals allow-downloads; default-src 'none'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src data: blob: 'self'; font-src data:; media-src data: blob:; form-action 'none'; frame-ancestors 'self'; base-uri 'none'";
 
 function pageShell(title, markdown) {
   const data = JSON.stringify(markdown).replace(/</g, '\\u003c');
@@ -191,16 +255,90 @@ route('POST', '/api/hooks/:id/:secret', async (req, res, p) => {
 route('POST', '/api/mcp/call', async (req) => {
   const run = app.runner.byToken.get(String(req.headers['x-bullpen-run'] || ''));
   if (!run) return { isError: true, text: 'This turn has ended; Bullpen tools are unavailable.' };
-  const b = await json(req);
+  const b = await json(req, 8e6);
   try { return await callTool(app, run, String(b.tool || ''), b.args || {}); } catch (e) { return { isError: true, text: e.message }; }
 }, { open: true });
 
+// Bullpen's tools over MCP "Streamable HTTP", answered with plain JSON. Claude Code connects to
+// this directly, so a bot turn needs no extra helper process. Auth: the per-turn bearer token.
+const { TOOLS } = require('./lib/tools-def');
+async function handleMcp(req, res) {
+  if (req.method !== 'POST') return send(res, 405, '', { allow: 'POST' });
+  const auth = String(req.headers.authorization || '');
+  const run = app.runner.byToken.get(auth.startsWith('Bearer ') ? auth.slice(7) : '');
+  let body;
+  try { body = JSON.parse((await readBody(req, 8e6)).toString('utf8')); } catch { return send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }); }
+  if (!run) return send(res, 401, { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'This turn has ended or the token is invalid.' } });
+  const one = async (m) => {
+    if (!m || typeof m !== 'object' || m.id === undefined || m.id === null) return null; // notification
+    const reply = (result) => ({ jsonrpc: '2.0', id: m.id, result });
+    switch (m.method) {
+      case 'initialize':
+        return reply({ protocolVersion: (m.params && m.params.protocolVersion) || '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'bullpen', version: pkg.version } });
+      case 'ping': return reply({});
+      case 'tools/list': return reply({ tools: TOOLS });
+      case 'tools/call': {
+        const p = m.params || {};
+        let r;
+        try { r = await callTool(app, run, String(p.name || ''), p.arguments || {}); } catch (e) { r = { isError: true, text: e.message }; }
+        return reply({ content: [{ type: 'text', text: String(r.text == null ? '' : r.text) }], isError: !!r.isError });
+      }
+      default: return { jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'Method not found' } };
+    }
+  };
+  const out = Array.isArray(body) ? (await Promise.all(body.map(one))).filter(Boolean) : await one(body);
+  if (!out || (Array.isArray(out) && !out.length)) { res.writeHead(202); return res.end(); }
+  return send(res, 200, out);
+}
+
 // ---------------- server ----------------
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => {
+  handle(req, res).catch((e) => {
+    if (!(e instanceof URIError) && !e.status) console.error('[bullpen]', req.method, req.url, e);
+    if (!res.headersSent) send(res, e instanceof URIError ? 400 : e.status || 500, { error: e instanceof URIError ? 'Bad request' : e.message || 'Server error' });
+    else res.end();
+  });
+});
+
+async function handle(req, res) {
   let url;
   try { url = new URL(req.url, BASE); } catch { return send(res, 400, 'Bad request'); }
   if (!hostAllowed(req)) return send(res, 403, 'Forbidden host');
   const pathname = decodeURIComponent(url.pathname);
+
+  if (pathname === '/mcp') {
+    try { return await handleMcp(req, res); } catch (e) { if (!res.headersSent) send(res, e.status || 500, { error: e.message }); return; }
+  }
+
+  // Requests that change something must come from this app's own pages.
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const origin = req.headers.origin;
+    const site = req.headers['sec-fetch-site'];
+    if ((origin && origin !== 'null' && origin !== 'http://' + req.headers.host) || site === 'cross-site') return send(res, 403, { error: 'Cross-site request refused' });
+  }
+
+  if (pathname === '/login') {
+    if (req.method === 'POST') {
+      if (loginLimited()) return send(res, 429, loginPage('Too many attempts. Wait a few minutes.'), { 'content-type': 'text/html; charset=utf-8' });
+      const key = new URLSearchParams((await readBody(req, 4096).catch(() => Buffer.alloc(0))).toString('utf8')).get('key');
+      if (same(key, secret.accessKey)) return setSession(res, '/');
+      loginFails.push(Date.now());
+      app.audit('login.failed', {});
+      return send(res, 401, loginPage('That key didn\'t match.'), { 'content-type': 'text/html; charset=utf-8' });
+    }
+    return send(res, 200, loginPage(''), { 'content-type': 'text/html; charset=utf-8' });
+  }
+
+  const openRoute = req.method === 'POST' && (pathname === '/api/mcp/call' || pathname.startsWith('/api/hooks/'));
+  if (!openRoute && !authed(req)) {
+    if (req.method === 'GET' && pathname === '/' && url.searchParams.get('key')) {
+      if (!loginLimited() && same(url.searchParams.get('key'), secret.accessKey)) return setSession(res, '/');
+      loginFails.push(Date.now());
+    }
+    if (pathname.startsWith('/api/')) return send(res, 401, { error: 'Sign in required' });
+    if (req.method === 'GET') { res.writeHead(302, { location: '/login', 'cache-control': 'no-store' }); return res.end(); }
+    return send(res, 401, 'Sign in required');
+  }
 
   if (pathname.startsWith('/api/')) {
     for (const r of routes) {
@@ -234,12 +372,12 @@ const server = http.createServer(async (req, res) => {
     const body = p.format === 'markdown'
       ? pageShell(p.title, app.store.readText(path.join('pages', p.id + '.md')))
       : app.store.readText(path.join('pages', p.id + '.html'));
-    return send(res, 200, body, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': PAGE_CSP });
+    return send(res, 200, body, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': PAGE_CSP, 'x-frame-options': 'SAMEORIGIN' });
   }
 
   m = /^\/files\/([\w-]+)(?:\/.*)?$/.exec(pathname);
   if (m) {
-    const f = app.files[m[1]];
+    const f = app.fileById(m[1]);
     if (!f) return send(res, 404, 'Not found');
     const file = app.store.p(f.rel);
     const ext = path.extname(f.name).toLowerCase();
@@ -247,9 +385,9 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, {
       'content-type': MIME[ext] || 'application/octet-stream',
       'content-disposition': (inline ? 'inline' : 'attachment') + '; filename*=UTF-8\'\'' + encodeURIComponent(f.name),
-      'content-security-policy': "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'",
-      'x-content-type-options': 'nosniff',
+      'content-security-policy': "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'",
       'cache-control': 'no-store',
+      ...SEC_HEADERS,
     });
     return fs.createReadStream(file).on('error', () => res.end()).pipe(res);
   }
@@ -259,7 +397,8 @@ const server = http.createServer(async (req, res) => {
   if (!file.startsWith(PUBLIC + path.sep)) return send(res, 403, 'Forbidden');
   if (fs.existsSync(file) && fs.statSync(file).isFile()) return serveStatic(res, file);
   return serveStatic(res, path.join(PUBLIC, 'index.html'));
-});
+}
+process.on('unhandledRejection', (e) => console.error('[bullpen] unhandled:', e));
 
 // Approval prompts hold a request open while the user decides.
 server.requestTimeout = 0;
@@ -275,11 +414,11 @@ server.on('error', (e) => {
 app.load();
 server.listen(PORT, HOST, () => {
   const info = app.publicState().cli;
-  console.log('\n  Bullpen ' + pkg.version + ' — ' + BASE);
+  console.log('\n  Bullpen ' + pkg.version + ' — open this link to sign in:\n  ' + OPEN_URL);
   console.log('  Data:   ' + DATA);
   console.log('  Claude: ' + (info.found ? info.version + ' (' + info.path + ')' : 'NOT FOUND — ' + info.error));
   console.log('');
-  if (process.argv.includes('--open')) openBrowser(BASE);
+  if (process.argv.includes('--open')) openBrowser(OPEN_URL);
 });
 
 function openBrowser(u) {
@@ -287,9 +426,15 @@ function openBrowser(u) {
   try { spawn(cmd[0], cmd[1], { stdio: 'ignore', detached: true, windowsHide: true }).unref(); } catch {}
 }
 
-function shutdown() {
-  app.runner.shutdown();
-  setTimeout(() => process.exit(0), 300).unref();
+let closing = false;
+async function shutdown() {
+  if (closing) return;
+  closing = true;
+  app.scheduler.stop();
+  server.close();
+  for (const c of clients) c.end();
+  await app.runner.shutdown();
+  process.exit(0);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

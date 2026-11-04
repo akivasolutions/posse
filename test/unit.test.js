@@ -23,6 +23,13 @@ test('markdown block features', () => {
   assert.match(h, /<strong>bold<\/strong> <em>it<\/em> <code>code<\/code>/);
 });
 
+test('markdown never loads remote images', () => {
+  const h = renderMarkdown('![chart](https://evil.example/p.png?secret=1) ![local](/files/f_1/a.png)');
+  assert.ok(!h.includes('<img alt="chart"'));
+  assert.ok(h.includes('href="https://evil.example/p.png?secret=1"'));
+  assert.ok(h.includes('<img alt="local" src="/files/f_1/a.png">'));
+});
+
 test('markdown keeps snake_case and URLs intact', () => {
   const h = renderMarkdown('call my_var_name at https://x.com/a_b_c.');
   assert.ok(h.includes('my_var_name'));
@@ -57,4 +64,27 @@ test('mentions and handles', () => {
 test('tool steps read as plain English', () => {
   assert.strictEqual(describeTool('Read', { file_path: '/a/b/report.xlsx' }), 'Read report.xlsx');
   assert.strictEqual(describeTool('mcp__bullpen__delegate_task', { to: 'analyst', title: 'Q3' }), 'Delegated to @analyst: Q3');
+});
+
+test('permission mode names are read from the CLI help', () => {
+  const { parseHelp } = require('../lib/claude-cli');
+  const oldHelp = '  --permission-mode <mode>   Permission mode (choices: "acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan")\n  --append-system-prompt <p>\n  ... --append-system-prompt[-file] ...';
+  const newHelp = '  --permission-mode <mode>              Permission mode to use for the session\n                                        (choices: "acceptEdits", "auto",\n                                        "bypassPermissions", "manual",\n                                        "dontAsk", "plan")';
+  const a = parseHelp(oldHelp);
+  assert.ok(a.permissionModes.includes('default'));
+  assert.ok(a.flags.has('append-system-prompt-file'));
+  const b = parseHelp(newHelp);
+  assert.deepStrictEqual(b.permissionModes, ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']);
+});
+
+test('always-allow rules are scoped to one command, domain or folder', () => {
+  const { suggestRule, ruleDir } = require('../lib/app');
+  assert.strictEqual(suggestRule('Bash', { command: 'npm test' }), 'Bash(npm test)');
+  assert.strictEqual(suggestRule('WebFetch', { url: 'https://docs.example.com/a?b' }), 'WebFetch(domain:docs.example.com)');
+  assert.strictEqual(suggestRule('Read', { file_path: '/Users/pat/Clients/Acme/notes.txt' }), 'Read(//Users/pat/Clients/Acme/**)');
+  assert.strictEqual(suggestRule('Write', { file_path: '/srv/out/report.md' }), 'Edit(//srv/out/**)');
+  assert.strictEqual(suggestRule('Grep', { path: '/var/log' }), 'Read(//var/log/**)');
+  assert.strictEqual(ruleDir('C:\\Users\\pat\\Clients'), '//c/Users/pat/Clients/**');
+  assert.strictEqual(suggestRule('Read', { file_path: 'relative.txt' }), '', 'no rule rather than a broad one');
+  assert.strictEqual(suggestRule('Mystery', {}), '');
 });

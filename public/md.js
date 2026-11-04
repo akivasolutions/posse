@@ -8,7 +8,8 @@
   }
   function safeUrl(u) {
     u = String(u || '').trim();
-    return /^(https?:\/\/|mailto:|\/(?!\/)|#)/i.test(u) ? u : null;
+    if (/[\u0000-\u001f]/.test(u)) return null;
+    return /^(https?:\/\/|mailto:|\/(?![\/\\])|#)/i.test(u) ? u : null;
   }
 
   function inline(src) {
@@ -16,18 +17,29 @@
     const hold = (html) => { keep.push(html); return '\u0000' + (keep.length - 1) + '\u0000'; };
     let s = String(src);
     s = s.replace(/(`+)([^`\n]|[^`\n][\s\S]*?[^`\n])\1(?!`)/g, (_, t, c) => hold('<code>' + esc(c.trim() ? c : c) + '</code>'));
-    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, u) => { const url = safeUrl(u); return url ? hold('<img alt="' + esc(alt) + '" src="' + esc(url) + '">') : m; });
+    // Only same-origin images are shown inline; remote ones become links, so rendering a message
+    // never makes a request to another site.
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, u) => {
+      const url = safeUrl(u);
+      if (!url) return m;
+      if (/^\/(?!\/)/.test(url)) return hold('<img alt="' + esc(alt) + '" src="' + esc(url) + '">');
+      return hold('<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">🖼 ' + esc(alt || url) + '</a>');
+    });
     s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (m, t, u) => {
       const url = safeUrl(u);
-      return url ? hold('<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">') + t + hold('</a>') : t;
+      // Link text gets emphasis but never another link inside it.
+      return url ? hold('<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + emph(esc(t.replace(/\u0000\d+\u0000/g, ''))) + '</a>') : t;
     });
     s = s.replace(/(^|[\s(])(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g, (m, pre, u) => pre + hold('<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(u) + '</a>'));
-    s = esc(s);
-    s = s.replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>').replace(/__(?=\S)([\s\S]*?\S)__(?!\w)/g, '<strong>$1</strong>');
-    s = s.replace(/(^|[^*\w])\*(?=\S)([^*\n]*?\S)\*(?![*\w])/g, '$1<em>$2</em>').replace(/(^|[^_\w])_(?=\S)([^_\n]*?\S)_(?![_\w])/g, '$1<em>$2</em>');
-    s = s.replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>');
+    s = emph(esc(s));
     s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[+i]);
     return s;
+  }
+
+  function emph(s) {
+    s = s.replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>').replace(/__(?=\S)([\s\S]*?\S)__(?!\w)/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*\w])\*(?=\S)([^*\n]*?\S)\*(?![*\w])/g, '$1<em>$2</em>').replace(/(^|[^_\w])_(?=\S)([^_\n]*?\S)_(?![_\w])/g, '$1<em>$2</em>');
+    return s.replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>');
   }
 
   const LIST = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;

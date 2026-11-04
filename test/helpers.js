@@ -14,18 +14,21 @@ function freePort() {
 async function startServer() {
   const port = await freePort();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bullpen-test-'));
-  const env = { ...process.env, CLAUDE_BIN: path.join(__dirname, 'fake-claude.js'), FAKE_CLAUDE_DIR: path.join(tmp, 'fake') };
+  const fake = path.join(__dirname, process.platform === 'win32' ? 'fake-claude.cmd' : 'fake-claude.js');
+  const env = { ...process.env, CLAUDE_BIN: fake, FAKE_CLAUDE_DIR: path.join(tmp, 'fake') };
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--port', String(port), '--data', path.join(tmp, 'data')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = '';
   child.stdout.on('data', (c) => { log += c; });
   child.stderr.on('data', (c) => { log += c; });
   const base = 'http://127.0.0.1:' + port;
   for (let i = 0; i < 100; i++) {
-    try { const r = await fetch(base + '/api/state'); if (r.ok) break; } catch {}
+    try { const r = await fetch(base + '/login'); if (r.ok) break; } catch {}
     await new Promise((r) => setTimeout(r, 100));
   }
+  const secret = JSON.parse(fs.readFileSync(path.join(tmp, 'data', 'secret.json'), 'utf8'));
+  const auth = { authorization: 'Bearer ' + secret.accessKey };
   const api = async (method, url, body, headers = {}) => {
-    const r = await fetch(base + url, { method, headers: { 'X-Bullpen': '1', 'content-type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const r = await fetch(base + url, { method, headers: { 'X-Bullpen': '1', 'content-type': 'application/json', ...auth, ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
     const data = await r.json().catch(() => ({}));
     return { status: r.status, data };
   };
@@ -37,7 +40,7 @@ async function startServer() {
   };
   const calls = () => { try { return fs.readFileSync(path.join(tmp, 'fake', 'calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((c) => c.argv.includes('-p')); } catch { return []; } };
   const stop = () => new Promise((resolve) => { child.on('exit', resolve); child.kill('SIGTERM'); setTimeout(resolve, 1500); });
-  return { base, api, msgs, waitFor, calls, stop, tmp, port, log: () => log };
+  return { base, api, msgs, waitFor, calls, stop, tmp, port, auth, secret, log: () => log };
 }
 
 module.exports = { startServer };

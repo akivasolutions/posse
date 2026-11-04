@@ -17,7 +17,10 @@ test.after(async () => { await T.stop(); });
 
 const lastBot = (list) => [...list].reverse().find((m) => m.role === 'bot' && m.kind === 'text');
 const idle = async (botId) => T.waitFor(async () => { const b = (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === botId); return b.status.state === 'idle'; }, 20000, 'bot idle');
-const history = () => fs.readdirSync(path.join(T.tmp, 'fake')).filter((f) => f.startsWith('session-')).map((f) => JSON.parse(fs.readFileSync(path.join(T.tmp, 'fake', f), 'utf8')).history).flat();
+// The fake CLI may be mid-write on a session file; skip any file that doesn't parse yet.
+const history = () => fs.readdirSync(path.join(T.tmp, 'fake')).filter((f) => f.startsWith('session-')).map((f) => {
+  try { return JSON.parse(fs.readFileSync(path.join(T.tmp, 'fake', f), 'utf8')).history; } catch { return []; }
+}).flat();
 test.beforeEach(async () => { if (chief) await idle(chief.id); });
 
 test('first run seeds a primary bot and finds the CLI', async () => {
@@ -44,7 +47,9 @@ test('a direct message gets a reply and the session persists', async () => {
   assert.ok(calls[0].argv.includes('--session-id'), 'first turn creates the session');
   // Isolation from the user's own Claude settings by default.
   assert.ok(last.includes('--strict-mcp-config'));
-  assert.strictEqual(last[last.indexOf('--setting-sources') + 1], 'project,local');
+  assert.strictEqual(last[last.indexOf('--setting-sources') + 1], '', 'no settings files: neither the user\'s nor the folder\'s');
+  const allowed = last[last.indexOf('--allowedTools') + 1].split(',');
+  for (const t of ['Read', 'Grep', 'Glob', 'WebFetch']) assert.ok(!allowed.includes(t), t + ' is not pre-approved');
   assert.strictEqual(last[last.indexOf('--permission-mode') + 1], 'default');
   assert.strictEqual(last[last.indexOf('--permission-prompt-tool') + 1], 'mcp__bullpen__approval_prompt');
 });
@@ -155,12 +160,12 @@ test('pages, drafts, files and reactions', async () => {
   const all = await T.waitFor(async () => { const m = await T.msgs(ch); return m.some((x) => x.kind === 'card' && x.card.type === 'file') ? m : null; }, 15000, 'cards');
   const page = all.find((m) => m.kind === 'card' && m.card.type === 'page');
   assert.ok(page && all.some((m) => m.kind === 'card' && m.card.type === 'draft' && m.card.body === 'Draft body'));
-  const pr = await fetch(T.base + '/pages/' + page.card.pageId);
+  const pr = await fetch(T.base + '/pages/' + page.card.pageId, { headers: T.auth });
   assert.match(pr.headers.get('content-security-policy'), /sandbox/);
   const body = await pr.text();
   assert.ok(!body.includes('<script>alert(1)</script>'), 'markdown page content is not injected raw');
   const fc = all.find((m) => m.kind === 'card' && m.card.type === 'file');
-  const fr = await fetch(T.base + '/files/' + fc.card.fileId + '/report.txt');
+  const fr = await fetch(T.base + '/files/' + fc.card.fileId + '/report.txt', { headers: T.auth });
   assert.strictEqual(await fr.text(), 'hello file');
   await T.waitFor(async () => (await T.msgs(ch)).some((m) => m.role === 'user' && m.reactions && m.reactions[0].emoji === '👍'), 15000, 'reaction');
 });
@@ -252,7 +257,7 @@ test('failures are reported and three in a row pause the bot', async () => {
 });
 
 test('security: CSRF header, Host check, MCP token', async () => {
-  const noHeader = await fetch(T.base + '/api/bots', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"name":"x"}' });
+  const noHeader = await fetch(T.base + '/api/bots', { method: 'POST', headers: { 'content-type': 'application/json', ...T.auth }, body: '{"name":"x"}' });
   assert.strictEqual(noHeader.status, 403);
   const http = require('http');
   const evil = await new Promise((resolve) => {
@@ -275,4 +280,172 @@ test('deleting a bot fails its open tasks and moves it to trash', async () => {
   const t = (await T.api('GET', '/api/state')).data.tasks.find((x) => x.title === 'Orphan');
   assert.strictEqual(t.status, 'failed');
   assert.ok(fs.readdirSync(path.join(T.tmp, 'data', 'trash')).some((f) => f.startsWith(b.id)));
+});
+
+test('group chat: one speaker at a time, in mention order, no double call-ins, NO_REPLY stays silent', async () => {
+  const st = (await T.api('GET', '/api/state')).data;
+  const analyst = st.bots.find((b) => b.handle === 'analyst');
+  const room = (await T.api('POST', '/api/rooms', { name: 'Floor', members: [chief.id, analyst.id] })).data.room;
+  const ch = 'room:' + room.id;
+  const text = ['@analyst then @chief-of-staff please', '@@as analyst sleep 600', '@@as analyst reply FIRST, over to {AT}chief-of-staff', '@@as chief-of-staff reply SECOND'].join('\n');
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text });
+  await T.waitFor(async () => (await T.msgs(ch)).filter((m) => m.role === 'bot').length >= 2, 20000, 'two replies');
+  await idle(chief.id); await idle(analyst.id);
+  const bots = (await T.msgs(ch)).filter((m) => m.role === 'bot');
+  assert.deepStrictEqual(bots.map((m) => m.text), ['FIRST, over to @chief-of-staff', 'SECOND'], 'analyst first, chief once');
+  const chiefTurn = history().find((h) => /Group chat "Floor"/.test(h.in) && /FIRST, over to/.test(h.in));
+  assert.ok(chiefTurn, 'the second speaker saw the first speaker\'s reply');
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: '@analyst anything?\n@@as analyst reply NO_REPLY' });
+  await T.waitFor(() => history().some((h) => /anything\?/.test(h.in)), 15000, 'silent turn');
+  await idle(analyst.id);
+  const after = (await T.msgs(ch)).filter((m) => m.role === 'bot');
+  assert.strictEqual(after.length, 2, 'NO_REPLY posts nothing');
+});
+
+test('long sessions: bot saves notes, then starts a fresh session with a recap', async () => {
+  const b = (await T.api('POST', '/api/bots', { name: 'Marathon' })).data.bot;
+  await T.api('PATCH', '/api/config', { sessionMaxTokens: 50000 });
+  const ch = 'dm:' + b.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'big turn\n@@ctx 60000' });
+  await T.waitFor(async () => (await T.msgs(ch)).some((m) => m.role === 'system' && /Session refreshed/.test(m.text)), 20000, 'session refreshed');
+  const handoffTurn = history().find((h) => /context is getting large/i.test(h.in));
+  assert.ok(handoffTurn, 'bot was asked to save notes');
+  const after = (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === b.id);
+  assert.strictEqual(after.session.id, '');
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'carry on' });
+  const next = await T.waitFor(() => history().find((h) => /carry on/.test(h.in)), 15000, 'next turn');
+  assert.match(next.in, /Session restarted/);
+  assert.match(next.in, /big turn/);
+  await T.api('PATCH', '/api/config', { sessionMaxTokens: 150000 });
+});
+
+test('tools over HTTP by default, stdio helper as a fallback; /mcp needs a live turn token', async () => {
+  const transports = () => fs.readFileSync(path.join(T.tmp, 'fake', 'transports.log'), 'utf8').trim().split('\n');
+  assert.ok(transports().every((t) => t === 'http'), 'default transport is http');
+  const bad = await fetch(T.base + '/mcp', { method: 'POST', headers: { authorization: 'Bearer nope', 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' });
+  assert.strictEqual(bad.status, 401);
+  const get = await fetch(T.base + '/mcp');
+  assert.strictEqual(get.status, 405);
+  await T.api('PATCH', '/api/config', { mcpTransport: 'stdio' });
+  const ch = 'dm:' + chief.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'via stdio\n@@call memory_add {"text":"stdio works"}' });
+  await T.waitFor(async () => /stdio works/.test((await T.api('GET', '/api/bots/' + chief.id + '/memory')).data.text), 15000, 'stdio tool call');
+  assert.strictEqual(transports().pop(), 'stdio');
+  await T.api('PATCH', '/api/config', { mcpTransport: 'http' });
+});
+
+test('access key: sign-in required, cookie session, cross-site writes refused, headers set', async () => {
+  const st = await fetch(T.base + '/api/state');
+  assert.strictEqual(st.status, 401);
+  const root = await fetch(T.base + '/', { redirect: 'manual' });
+  assert.strictEqual(root.status, 302);
+  assert.strictEqual(root.headers.get('location'), '/login');
+  const wrong = await fetch(T.base + '/?key=nope', { redirect: 'manual' });
+  assert.strictEqual(wrong.headers.get('location'), '/login');
+  const right = await fetch(T.base + '/?key=' + encodeURIComponent(T.secret.accessKey), { redirect: 'manual' });
+  const cookie = right.headers.get('set-cookie');
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /SameSite=Strict/);
+  const withCookie = await fetch(T.base + '/api/state', { headers: { cookie: cookie.split(';')[0] } });
+  assert.strictEqual(withCookie.status, 200);
+  const page = await fetch(T.base + '/', { headers: { cookie: cookie.split(';')[0] } });
+  assert.match(page.headers.get('content-security-policy'), /script-src 'self'/);
+  assert.match(page.headers.get('content-security-policy'), /img-src 'self' data: blob:/);
+  assert.strictEqual(page.headers.get('x-frame-options'), 'DENY');
+  const bad = await fetch(T.base + '/login', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'key=wrong' });
+  assert.strictEqual(bad.status, 401);
+  const good = await fetch(T.base + '/login', { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'key=' + encodeURIComponent(T.secret.accessKey) });
+  assert.strictEqual(good.status, 302);
+  const xsite = await fetch(T.base + '/api/bots', { method: 'POST', headers: { ...T.auth, 'X-Bullpen': '1', 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{"name":"x"}' });
+  assert.strictEqual(xsite.status, 403);
+  if (process.platform !== 'win32') {
+    assert.strictEqual(fs.statSync(path.join(T.tmp, 'data')).mode & 0o777, 0o700);
+    assert.strictEqual(fs.statSync(path.join(T.tmp, 'data', 'secret.json')).mode & 0o777, 0o600);
+  }
+});
+
+test('regressions: malformed URLs never take the server down', async () => {
+  for (const u of ['/%E0', '/api/channels/%25E0/messages', '/files/constructor', '/files/__proto__/x', '/pages/%ZZ']) {
+    const r = await fetch(T.base + u, { headers: T.auth });
+    assert.ok([400, 404].includes(r.status), u + ' -> ' + r.status);
+  }
+  assert.strictEqual((await T.api('GET', '/api/state')).status, 200, 'still up');
+});
+
+test('regressions: always-allow rules with odd characters go through a settings file', async () => {
+  const ch = 'dm:' + chief.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'sneaky\n@@perm Bash {"command":"echo \\"done) Bash (ok\\""}' });
+  const card = await T.waitFor(async () => (await T.msgs(ch)).find((m) => m.kind === 'card' && m.card.type === 'approval' && m.card.status === 'pending'), 15000, 'approval card');
+  await T.api('POST', '/api/channels/' + ch + '/cards/' + card.id, { decision: 'always' });
+  await idle(chief.id);
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'next' });
+  await T.waitFor(() => T.calls().some((c) => c.settings && JSON.stringify(c.settings).includes('done) Bash (ok')), 15000, 'settings file');
+  const last = T.calls().filter((c) => c.settings).pop();
+  const allowed = last.argv[last.argv.indexOf('--allowedTools') + 1];
+  assert.ok(!allowed.includes('done)'), 'rule is not in the comma list');
+  assert.deepStrictEqual(last.settings.permissions.allow.slice(-1), ['Bash(echo "done) Bash (ok")']);
+  // Commands with * never become rules.
+  const { suggestRule } = require('../lib/app');
+  assert.strictEqual(suggestRule('Bash', { command: 'rm -rf build/*' }), '');
+  await idle(chief.id);
+  await T.api('PATCH', '/api/bots/' + chief.id, { alwaysAllow: [] });
+});
+
+test('regressions: deleting a bot mid-turn does not bring it back', async () => {
+  const b = (await T.api('POST', '/api/bots', { name: 'Doomed' })).data.bot;
+  await T.api('POST', '/api/channels/dm:' + b.id + '/messages', { text: 'slow\n@@sleep 3000' });
+  await T.waitFor(async () => (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === b.id).status.state === 'working', 10000, 'working');
+  await T.api('DELETE', '/api/bots/' + b.id);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.ok(!(await T.api('GET', '/api/state')).data.bots.some((x) => x.id === b.id));
+  assert.ok(!fs.existsSync(path.join(T.tmp, 'data', 'bots', b.id, 'bot.json')), 'bot folder not recreated');
+  assert.ok(fs.readdirSync(path.join(T.tmp, 'data', 'trash')).some((f) => f.startsWith(b.id)), 'moved to trash after the turn ended');
+});
+
+test('regressions: "New session" during a turn sticks', async () => {
+  const ch = 'dm:' + chief.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'slowish\n@@sleep 1500' });
+  await T.waitFor(async () => (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === chief.id).status.state === 'working', 10000, 'working');
+  await T.api('POST', '/api/bots/' + chief.id + '/reset-session');
+  await idle(chief.id);
+  const b = (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === chief.id);
+  assert.strictEqual(b.session.id, '', 'the reset was not undone by the finishing turn');
+});
+
+test('regressions: skill rename cannot delete files outside skills/', async () => {
+  const victim = path.join(T.tmp, 'data', 'victim.md');
+  fs.writeFileSync(victim, 'keep me');
+  await T.api('POST', '/api/skills', { name: 'Harmless', description: 'x', body: 'y', prevSlug: '../victim' });
+  assert.ok(fs.existsSync(victim));
+});
+
+test('regressions: a one-time routine can be re-armed after it ran', async () => {
+  const r = (await T.api('POST', '/api/routines', { botId: chief.id, title: 'Once', instructions: 'x\n@@reply NO_UPDATE', schedule: { type: 'once', at: '2020-01-01T09:00' } })).data;
+  await T.api('POST', '/api/routines/' + r.id + '/run');
+  await T.waitFor(async () => (await T.api('GET', '/api/state')).data.routines.find((x) => x.id === r.id).runs.length, 15000, 'ran');
+  await idle(chief.id);
+  const future = new Date(Date.now() + 86400e3);
+  const p2 = (n) => String(n).padStart(2, '0');
+  const at = future.getFullYear() + '-' + p2(future.getMonth() + 1) + '-' + p2(future.getDate()) + 'T09:00';
+  const upd = (await T.api('PATCH', '/api/routines/' + r.id, { schedule: { type: 'once', at }, enabled: true })).data;
+  assert.ok(upd.nextRunAt > Date.now(), 'has a next run again');
+  await T.api('DELETE', '/api/routines/' + r.id);
+});
+
+test('regressions: each delegated task gets its own turn and its own report', async () => {
+  await T.api('PATCH', '/api/bots/' + chief.id, { paused: false });
+  const st = (await T.api('GET', '/api/state')).data;
+  const analyst = st.bots.find((b) => b.handle === 'analyst');
+  await T.api('PATCH', '/api/bots/' + analyst.id, { paused: true });
+  const ch = 'dm:' + chief.id;
+  const t1 = { to: 'analyst', title: 'Alpha', instructions: 'a\n@@reply alpha-report' };
+  const t2 = { to: 'analyst', title: 'Beta', instructions: 'b\n@@reply beta-report' };
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'two\n@@call delegate_task ' + JSON.stringify(t1) + '\n@@call delegate_task ' + JSON.stringify(t2) });
+  await T.waitFor(async () => (await T.api('GET', '/api/state')).data.tasks.filter((t) => ['Alpha', 'Beta'].includes(t.title)).length === 2, 15000, 'two tasks');
+  await idle(chief.id);
+  await T.api('PATCH', '/api/bots/' + analyst.id, { paused: false });
+  const done = await T.waitFor(async () => { const ts = (await T.api('GET', '/api/state')).data.tasks.filter((t) => ['Alpha', 'Beta'].includes(t.title) && t.status === 'done'); return ts.length === 2 ? ts : null; }, 20000, 'both done');
+  const byTitle = Object.fromEntries(done.map((t) => [t.title, t.result]));
+  assert.strictEqual(byTitle.Alpha, 'alpha-report');
+  assert.strictEqual(byTitle.Beta, 'beta-report');
 });

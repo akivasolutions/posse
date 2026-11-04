@@ -98,7 +98,11 @@
     renderSide();
     renderMain();
     renderPane();
-    if (isChat(ch)) api('POST', chUrl(ch) + '/read').catch(() => {});
+    if (isChat(ch)) {
+      const o = ch.startsWith('dm:') ? botById(ch.slice(3)) : roomById(ch.slice(5));
+      if (o && o.unread) { o.unread = 0; renderSide(); }
+      api('POST', chUrl(ch) + '/read').catch(() => {});
+    }
   }
   function fromHash() {
     const h = decodeURIComponent(location.hash.slice(1));
@@ -149,7 +153,7 @@
     }
     html += '</div>';
     const hiddenN = S.bots.filter((b) => b.hidden).length;
-    const nav = [['library', '▤', 'Library'], ['tasks', '☑', 'Tasks'], ['routines', '⏰', 'Routines'], ['skills', '✦', 'Skills'], ['memory', '◎', 'Memory']];
+    const nav = [['library', '▤', 'Library'], ['tasks', '☑', 'Tasks'], ['routines', '◷', 'Routines'], ['skills', '✦', 'Skills'], ['memory', '◎', 'Memory']];
     html += '<div class="side-foot">' + nav.map(([id, ic, label]) => '<button class="nav-btn' + (V.ch === 'view:' + id ? ' active' : '') + '" data-ch="view:' + id + '"><span>' + ic + '</span>' + label + '</button>').join('') + '</div>';
     html += '<div class="account" data-act="settings">' + userAv() + '<div class="who"><b>' + esc(S.config.userName) + '</b><small>' +
       (S.cli.found ? (S.usage.today.turns || 0) + ' turns today' + (hiddenN ? ' · ' + hiddenN + ' hidden' : '') : 'Claude Code not found') + '</small></div><span style="color:var(--muted)">⚙</span></div>';
@@ -252,6 +256,7 @@
   }
 
   $('#main').addEventListener('click', (e) => {
+    if (document.body.classList.contains('side-open') && !e.target.closest('[data-act=side]')) { document.body.classList.remove('side-open'); return; }
     const a = e.target.closest('[data-act]');
     if (!a) return;
     const act = a.dataset.act;
@@ -589,13 +594,20 @@
   function openPage(id) { V.pane = 'page:' + id; renderPane(); }
 
   function renderPane() {
+    const msgs = $('#msgs');
+    const stick = msgs && msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 160;
+    renderPaneInner();
+    if (stick && msgs.isConnected) msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  function renderPaneInner() {
     const pane = $('#pane');
     pane.classList.toggle('wide', !!(V.pane && V.pane.startsWith('page:')));
-    if (!V.pane || (V.pane === 'info' && !isChat(V.ch))) { pane.classList.add('hidden'); pane.innerHTML = ''; return; }
+    if (!V.pane || (V.pane === 'info' && !isChat(V.ch))) { pane.classList.add('hidden'); pane.innerHTML = ''; delete pane.dataset.page; return; }
     pane.classList.remove('hidden');
     if (V.pane.startsWith('page:')) {
       const p = S.pages.find((x) => x.id === V.pane.slice(5));
-      if (!p) { V.pane = null; renderPane(); return; }
+      if (!p) { V.pane = null; renderPaneInner(); return; }
       const src = '/pages/' + p.id + '?v=' + p.updatedAt;
       if (pane.dataset.page === src) return;
       pane.dataset.page = src;

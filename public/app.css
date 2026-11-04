@@ -50,6 +50,7 @@ a { color: var(--accent); }
 .hidden { display: none !important; }
 
 /* ---------- layout ---------- */
+.only-narrow { display: none !important; }
 #app { display: grid; grid-template-columns: 264px minmax(0, 1fr) auto; height: 100vh; }
 #side { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
 #main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
@@ -62,9 +63,8 @@ a { color: var(--accent); }
   body.side-open #side { transform: none; box-shadow: var(--shadow); }
   #pane { width: 100vw; }
   #pane.wide { width: 100vw; }
-  .only-narrow { display: inline-flex !important; }
+  .only-narrow { display: inline-grid !important; }
 }
-.only-narrow { display: none !important; }
 
 /* ---------- sidebar ---------- */
 .side-head { display: flex; align-items: center; gap: 8px; padding: 14px 12px 8px 16px; }
@@ -196,7 +196,7 @@ a { color: var(--accent); }
 .card .answer { margin-top: 8px; font-weight: 600; color: var(--accent); }
 .card .row-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
 .card textarea, .card input[type=text] { width: 100%; border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 9px; background: var(--bg); margin-top: 8px; resize: vertical; }
-.card pre.input { font: 12px var(--mono); background: var(--bg-sunk); padding: 8px 10px; border-radius: 7px; white-space: pre-wrap; max-height: 220px; overflow: auto; margin: 6px 0 0; }
+.card pre.input { font: 12px var(--mono); background: var(--bg-sunk); padding: 8px 10px; border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; margin: 6px 0 0; }
 .card.approval { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
 .card .state { font-size: 12.5px; font-weight: 600; }
 .state.ok { color: var(--ok); } .state.bad { color: var(--bad); } .state.wait { color: var(--warn); }

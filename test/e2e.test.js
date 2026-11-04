@@ -449,3 +449,71 @@ test('regressions: each delegated task gets its own turn and its own report', as
   assert.strictEqual(byTitle.Alpha, 'alpha-report');
   assert.strictEqual(byTitle.Beta, 'beta-report');
 });
+
+test('escalation guard: handing work to a more powerful bot needs approval', async () => {
+  const ops = (await T.api('POST', '/api/bots', { name: 'Ops', permission: 'full' })).data.bot;
+  const reader = (await T.api('POST', '/api/bots', { name: 'Reader', permission: 'readonly' })).data.bot;
+  const ch = 'dm:' + reader.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'go\n@@call delegate_task {"to":"ops","title":"Wipe","instructions":"rm -rf /tmp/x"}' });
+  const card = await T.waitFor(async () => (await T.msgs(ch)).find((m) => m.kind === 'card' && m.card.type === 'approval' && m.card.escalation && m.card.status === 'pending'), 15000, 'escalation card');
+  assert.match(card.card.tool, /Hand a task to Ops \(Full access\)/);
+  assert.strictEqual(card.card.rule, '', 'no "always allow" for escalations');
+  await T.api('POST', '/api/channels/' + ch + '/cards/' + card.id, { decision: 'deny' });
+  await T.waitFor(async () => { const l = lastBot(await T.msgs(ch)); return l && /declined handing this to @ops/.test(l.text); }, 15000, 'declined');
+  assert.ok(!(await T.api('GET', '/api/state')).data.tasks.some((t) => t.title === 'Wipe'));
+  // An "always" click on an escalation card is treated as a plain deny-proof one-time decision, never a rule.
+  await idle(reader.id);
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'again\n@@call delegate_task {"to":"ops","title":"Tidy","instructions":"tidy"}' });
+  const card2 = await T.waitFor(async () => (await T.msgs(ch)).find((m) => m.kind === 'card' && m.card.escalation && m.card.status === 'pending'), 15000, 'second card');
+  await T.api('POST', '/api/channels/' + ch + '/cards/' + card2.id, { decision: 'allow' });
+  await T.waitFor(async () => (await T.api('GET', '/api/state')).data.tasks.some((t) => t.title === 'Tidy'), 15000, 'task created after approval');
+  const audit = (await T.api('GET', '/api/security')).data.audit;
+  assert.ok(audit.some((r) => r.type === 'approval' && /Hand a task to Ops/.test(r.tool) && r.decision === 'deny'));
+  assert.ok(audit.some((r) => r.type === 'bot.created' && r.bot === 'Ops' && /Full access/.test(r.detail)));
+  // Same or lower permissions never ask.
+  const { App } = require('../lib/app');
+  await idle(reader.id); await idle(ops.id);
+  await T.api('DELETE', '/api/bots/' + ops.id); await T.api('DELETE', '/api/bots/' + reader.id);
+  assert.ok(App);
+});
+
+test('escalation guard in group chats: a call-in card instead of an automatic call-in', async () => {
+  const ops = (await T.api('POST', '/api/bots', { name: 'Ops2', permission: 'full' })).data.bot;
+  const room = (await T.api('POST', '/api/rooms', { name: 'Guarded', members: [chief.id, ops.id] })).data.room;
+  const ch = 'room:' + room.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: '@chief-of-staff hi\n@@as chief-of-staff reply over to {AT}ops2' });
+  const card = await T.waitFor(async () => (await T.msgs(ch)).find((m) => m.kind === 'card' && m.card.type === 'callin'), 15000, 'call-in card');
+  await idle(chief.id);
+  assert.ok(!(await T.msgs(ch)).some((m) => m.role === 'bot' && m.botId === ops.id), 'not called in automatically');
+  await T.api('POST', '/api/channels/' + ch + '/cards/' + card.id, { decision: 'approve' });
+  await T.waitFor(async () => (await T.msgs(ch)).some((m) => m.role === 'bot' && m.botId === ops.id), 15000, 'called in after approval');
+  await idle(ops.id);
+  await T.api('DELETE', '/api/bots/' + ops.id);
+});
+
+test('security settings: key rotation, webhook rate limit, audit of settings changes', async () => {
+  const before = (await T.api('GET', '/api/security')).data;
+  assert.ok(before.accessKey && before.openUrl.includes('?key='));
+  const unauth = await fetch(T.base + '/api/security');
+  assert.strictEqual(unauth.status, 401);
+  await T.api('PATCH', '/api/config', { maxDepth: 5 });
+  await T.api('PATCH', '/api/config', { maxDepth: 4 });
+  const audit = (await T.api('GET', '/api/security')).data.audit;
+  assert.ok(audit.some((r) => r.type === 'settings.changed' && /maxDepth: 4 → 5/.test(r.detail)));
+  const w = (await T.api('POST', '/api/routines', { botId: chief.id, title: 'Hooky', instructions: 'x\n@@reply NO_UPDATE', schedule: { type: 'webhook' } })).data;
+  await T.api('PATCH', '/api/bots/' + chief.id, { paused: true });
+  const url = T.base + new URL(w.webhook).pathname;
+  let last = 0;
+  for (let i = 0; i < 61; i++) last = (await fetch(url, { method: 'POST', body: 'e' + i })).status;
+  assert.strictEqual(last, 429);
+  await T.api('POST', '/api/bots/' + chief.id + '/clear-queue');
+  await T.api('PATCH', '/api/bots/' + chief.id, { paused: false });
+  await T.api('DELETE', '/api/routines/' + w.id);
+  const rot = await fetch(T.base + '/api/security/rotate-key', { method: 'POST', headers: { ...T.auth, 'X-Bullpen': '1' } });
+  const fresh = await rot.json();
+  assert.notStrictEqual(fresh.accessKey, before.accessKey);
+  const old = await fetch(T.base + '/api/state', { headers: T.auth });
+  assert.strictEqual(old.status, 401, 'old key no longer works');
+  T.auth.authorization = 'Bearer ' + fresh.accessKey;
+  assert.strictEqual((await T.api('GET', '/api/state')).status, 200);
+});

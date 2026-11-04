@@ -45,7 +45,7 @@ if (!secret || !secret.accessKey || !secret.cookie) {
   app.store.writeJSON(SECRET_FILE, secret);
 }
 const COOKIE = 'bp_session';
-const OPEN_URL = BASE + '/?key=' + encodeURIComponent(secret.accessKey);
+let OPEN_URL = BASE + '/?key=' + encodeURIComponent(secret.accessKey);
 function same(a, b) {
   const x = Buffer.from(String(a || '')); const y = Buffer.from(String(b || ''));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
@@ -232,6 +232,15 @@ route('POST', '/api/routines/:id/run', (req, res, p) => {
 route('DELETE', '/api/pages/:id', (req, res, p) => { app.deletePage(p.id); return { ok: true }; });
 
 route('PATCH', '/api/config', async (req) => ({ config: app.updateConfig(await json(req)) }));
+route('GET', '/api/security', () => ({ accessKey: secret.accessKey, openUrl: OPEN_URL, dataDir: app.store.dir, audit: app.readAudit(200) }));
+route('POST', '/api/security/rotate-key', (req, res) => {
+  secret = { accessKey: crypto.randomBytes(18).toString('base64url'), cookie: crypto.randomBytes(32).toString('base64url') };
+  app.store.writeJSON(SECRET_FILE, secret);
+  OPEN_URL = BASE + '/?key=' + encodeURIComponent(secret.accessKey);
+  app.audit('access-key.rotated', {});
+  res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': COOKIE + '=' + secret.cookie + '; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000', 'cache-control': 'no-store', ...SEC_HEADERS });
+  res.end(JSON.stringify({ accessKey: secret.accessKey, openUrl: OPEN_URL }));
+});
 route('POST', '/api/cli/check', () => { const cli = require('./lib/claude-cli'); const i = cli.detect(app.config.claudePath, { force: true }); return { found: i.found, path: i.path, version: i.version, error: i.error }; });
 
 route('POST', '/api/upload', async (req, res, p, url) => {
@@ -241,11 +250,17 @@ route('POST', '/api/upload', async (req, res, p, url) => {
   return { id: f.id, name: f.name, size: f.size };
 });
 
-// Webhook trigger for routines (authenticated by the routine's secret in the URL).
+// Webhook trigger for routines (authenticated by the routine's secret in the URL, 60 calls/hour).
+const hookHits = new Map();
 route('POST', '/api/hooks/:id/:secret', async (req, res, p) => {
   const r = app.routines.get(p.id);
   if (!r || r.secret !== p.secret || r.schedule.type !== 'webhook') throw httpError(404, 'Not found');
   if (!r.enabled) throw httpError(409, 'Routine is paused');
+  const now = Date.now();
+  const hits = (hookHits.get(r.id) || []).filter((t) => now - t < 3600e3);
+  if (hits.length >= 60) { app.audit('webhook.limited', { detail: r.title }); throw httpError(429, 'Rate limited: 60 calls per hour per routine'); }
+  hits.push(now);
+  hookHits.set(r.id, hits);
   const body = (await readBody(req, 256 * 1024)).toString('utf8');
   app.fireRoutine(r, body || '(empty body)');
   return { ok: true };

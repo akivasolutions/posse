@@ -379,10 +379,11 @@
       }
       case 'approval': {
         const input = Object.entries(c.input || {}).map(([k, v]) => k + ': ' + v).join('\n');
-        let h = '<div class="card approval"><h4>⚠️ Approve ' + esc(c.tool) + '?</h4><pre class="input">' + esc(input) + '</pre>';
+        let h = '<div class="card approval"><h4>' + (c.escalation ? '🛡 ' + esc(c.tool) + '?' : '⚠️ Approve ' + esc(c.tool) + '?') + '</h4>' +
+          (c.escalation ? '<div class="k">That bot has more permissions than the one asking. Approve only if this is what you want done.</div>' : '') + '<pre class="input">' + esc(input) + '</pre>';
         if (st === 'pending') {
           h += '<div class="row-actions"><button class="btn sm primary" data-act="ap" data-d="allow">Allow once</button>' +
-            (c.rule ? '<button class="btn sm" data-act="ap" data-d="always" title="Adds the rule ' + esc(c.rule) + ' to this bot">Always allow</button>' : '') +
+            (c.rule ? '<button class="btn sm" data-act="ap" data-d="always" title="Adds the rule ' + esc(c.rule) + ' to this bot">Always allow ' + esc(ruleScope(c.rule)) + '</button>' : '') +
             '<button class="btn sm danger" data-act="ap" data-d="deny">Deny</button></div>';
         } else {
           const label = { allowed: ['ok', 'Allowed'], always: ['ok', 'Always allowed'], denied: ['bad', 'Denied' + (c.note ? ' — ' + c.note : '')], expired: ['bad', 'Expired'] }[st] || ['', st];
@@ -412,6 +413,13 @@
         const to = botById(t.to);
         return '<div class="card task" data-task="' + t.id + '"><span>☑</span><div class="tt"><b>#' + t.id + ' ' + esc(t.title) + '</b><span class="k">→ ' + esc(to ? to.name : 'deleted bot') + '</span></div><span class="pill ' + esc(t.status) + '">' + esc(t.status) + '</span></div>';
       }
+      case 'callin': {
+        const t = botById(c.botId); const f = botById(c.fromBotId);
+        let h = '<div class="card approval"><h4>🛡 Call in ' + esc(t ? t.name : '?') + '?</h4><div class="k">' + esc(f ? f.name : 'A bot') + ' mentioned ' + esc(t ? t.name : 'a bot') + ', which has more permissions (' + esc(c.perm) + '). Bring it into this chat?</div>';
+        if (st === 'pending') h += '<div class="row-actions"><button class="btn sm primary" data-act="rt" data-d="approve">Call in</button><button class="btn sm" data-act="rt" data-d="decline">Not now</button></div>';
+        else h += '<div class="row-actions"><span class="state ' + (st === 'approved' ? 'ok' : 'bad') + '">' + esc(st === 'approved' ? 'Called in' : 'Declined') + '</span></div>';
+        return h + '</div>';
+      }
       case 'routine': {
         const b = botById(c.botId);
         let h = '<div class="card"><h4>⏰ Routine: ' + esc(c.title) + '</h4><div><span class="k">When</span> ' + esc(c.scheduleText) + '</div><div><span class="k">Bot</span> ' + esc(b ? b.name : '?') + '</div>' +
@@ -422,6 +430,18 @@
       }
       default: return '<div class="card">' + esc(c.type) + '</div>';
     }
+  }
+
+  // Short description of what an "Always allow" rule covers, for the button label.
+  function ruleScope(rule) {
+    let m = /^Read\(\/\/(.*)\/\*\*\)$/.exec(rule);
+    if (m) return 'reads in ' + m[1].split('/').pop();
+    m = /^Edit\(\/\/(.*)\/\*\*\)$/.exec(rule);
+    if (m) return 'edits in ' + m[1].split('/').pop();
+    m = /^WebFetch\(domain:(.*)\)$/.exec(rule);
+    if (m) return m[1];
+    if (/^(Bash|PowerShell)\(/.test(rule)) return 'this command';
+    return '';
   }
 
   function renderLive() {
@@ -959,7 +979,7 @@
     const c = S.config;
     const lim = (name, label, hint, min, max) => field(label, '<input type="number" name="' + name + '" min="' + min + '" max="' + max + '" value="' + esc(c[name]) + '">', hint);
     const m = modal('<div class="modal-head"><h3>Settings</h3><button class="icon-btn" data-m="x">✕</button></div>' +
-      '<div class="tabs"><button class="tab" data-tab="general">General</button><button class="tab" data-tab="bots">Bots & Claude</button><button class="tab" data-tab="limits">Limits</button><button class="tab" data-tab="about">About</button></div><div class="modal-body">' +
+      '<div class="tabs"><button class="tab" data-tab="general">General</button><button class="tab" data-tab="bots">Bots & Claude</button><button class="tab" data-tab="limits">Limits</button><button class="tab" data-tab="security">Security</button><button class="tab" data-tab="about">About</button></div><div class="modal-body">' +
       '<div data-pane="general">' + field('Your name', '<input type="text" name="userName" maxlength="60" value="' + esc(c.userName) + '">', 'Bots call you this.') +
         '<div class="cols">' + field('Theme', '<select name="theme">' + opts([['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']], c.theme) + '</select>') +
         field('Accent color', '<div class="swatches">' + COLORS.map((x) => '<span class="swatch' + (x === c.accent ? ' sel' : '') + '" data-color="' + x + '" style="background:' + x + '"></span>').join('') + '</div><input type="hidden" name="accent" value="' + esc(c.accent) + '">') + '</div>' +
@@ -983,11 +1003,28 @@
         lim('approvalTimeoutMin', 'Approval wait (minutes)', 'Unanswered approval cards are declined after this.', 1, 720) +
         lim('sessionMaxTokens', 'Session size before refresh (tokens)', 'When a bot\'s context passes this, it saves notes to memory and starts a fresh session.', 50000, 1000000) +
       '</div></div>' +
+      '<div data-pane="security" class="hidden">' +
+        '<label class="field inline"><input type="checkbox" name="escalationGuard"' + (c.escalationGuard !== false ? ' checked' : '') + '><span>Ask me before a bot hands work to a bot with more permissions</span></label>' +
+        '<small style="display:block;color:var(--muted);margin:-8px 0 14px">Stops a bot that was misled by something it read from getting a more powerful teammate to act for it.</small>' +
+        '<div class="field"><span>Access key</span><div style="display:flex;gap:6px;flex-wrap:wrap"><input type="password" id="sec-key" readonly style="flex:1;min-width:160px;font-family:var(--mono);border:1px solid var(--line-strong);border-radius:8px;padding:7px 10px;background:var(--bg)">' +
+        '<button class="btn sm" data-m="show-key">Show</button><button class="btn sm" data-m="copy-link">Copy sign-in link</button><button class="btn sm danger" data-m="rotate">New key</button></div>' +
+        '<small>Anyone with this key (or the sign-in link) can use your bots. A new key signs out every other browser.</small></div>' +
+        '<div class="field"><span>Recent security events</span><div id="sec-audit" style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px;font-size:12.5px"><div style="padding:8px;color:var(--muted)">Loading…</div></div></div>' +
+      '</div>' +
       '<div data-pane="about" class="hidden"><p><b>Bullpen</b> — a local team of persistent AI bots, powered by the Claude Code CLI. Open source, MIT license.</p>' +
         '<dl class="kv"><dt>Data folder</dt><dd style="font:12px var(--mono)">' + esc(S.dataDir) + '</dd><dt>Today</dt><dd>' + (S.usage.today.turns || 0) + ' turns · $' + (S.usage.today.costUsd || 0).toFixed(2) + ' API-equivalent</dd></dl>' +
         '<p style="color:var(--muted);font-size:12.5px">Everything (chats, memory, pages, routines) is plain files in the data folder. Back it up like any folder. Keyboard: ⌘/Ctrl+K search · ⌘/Ctrl+Shift+I details · ⌘/Ctrl+, settings.</p></div>' +
       '</div><div class="modal-foot"><span class="grow"></span><button class="btn" data-m="x">Close</button><button class="btn primary" data-m="save">Save</button></div>', { wide: true });
-    const showTab = (t) => { $$('.tab', m).forEach((x) => x.classList.toggle('active', x.dataset.tab === t)); $$('[data-pane]', m).forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== t)); };
+    let sec = null;
+    const loadSecurity = async () => {
+      sec = await attempt(() => api('GET', '/api/security'));
+      if (!sec || !$('#sec-key')) return;
+      $('#sec-key').value = sec.accessKey;
+      const label = { approval: 'Approval', escalation: 'Escalation', 'bot.changed': 'Bot changed', 'bot.created': 'Bot created', 'bot.deleted': 'Bot deleted', 'settings.changed': 'Settings', webhook: 'Webhook', 'webhook.limited': 'Webhook limited', 'login.failed': 'Failed sign-in', 'access-key.rotated': 'New access key' };
+      $('#sec-audit').innerHTML = sec.audit.length ? sec.audit.map((r) => '<div style="padding:6px 10px;border-bottom:1px solid var(--line)"><b>' + esc(label[r.type] || r.type) + '</b> <span style="color:var(--muted)">' + esc(fmtTime(r.ts)) + '</span><br>' +
+        esc([r.bot, r.tool, r.decision, r.detail, r.note].filter(Boolean).join(' · ')) + '</div>').join('') : '<div style="padding:8px;color:var(--muted)">Nothing yet.</div>';
+    };
+    const showTab = (t) => { $$('.tab', m).forEach((x) => x.classList.toggle('active', x.dataset.tab === t)); $$('[data-pane]', m).forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== t)); if (t === 'security') loadSecurity(); };
     showTab(tab);
     m.addEventListener('click', async (e) => {
       const t = e.target.closest('[data-tab]');
@@ -997,10 +1034,17 @@
       const a = e.target.closest('[data-m]');
       if (!a) return;
       if (a.dataset.m === 'x') { closeModal(); applyTheme(); }
+      else if (a.dataset.m === 'show-key') { const k = $('#sec-key'); k.type = k.type === 'password' ? 'text' : 'password'; a.textContent = k.type === 'password' ? 'Show' : 'Hide'; }
+      else if (a.dataset.m === 'copy-link' && sec) { try { await navigator.clipboard.writeText(sec.openUrl); toast('Sign-in link copied'); } catch { toast('Copy failed', true); } }
+      else if (a.dataset.m === 'rotate') {
+        if (!(await confirmBox('Make a new access key?', 'Every other browser using Bullpen is signed out and needs the new key. This browser stays signed in.', 'New key'))) return;
+        const r = await attempt(() => api('POST', '/api/security/rotate-key'));
+        if (r) { toast('New access key made'); settingsModal('security'); }
+      }
       else if (a.dataset.m === 'notify') { if (typeof Notification !== 'undefined') { await Notification.requestPermission(); a.textContent = Notification.permission === 'granted' ? 'Enabled ✓' : 'Blocked in browser settings'; } }
       else if (a.dataset.m === 'save') {
         const body = {};
-        $$('[name]', m).forEach((el) => { body[el.name] = el.value; });
+        $$('[name]', m).forEach((el) => { body[el.name] = el.type === 'checkbox' ? el.checked : el.value; });
         const r = await attempt(() => api('PATCH', '/api/config', body));
         if (r) { closeModal(); toast('Settings saved'); await refreshState(); }
       }

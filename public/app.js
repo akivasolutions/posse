@@ -34,6 +34,14 @@
       description: 'Reads what comes in (files, exports, webhook events), sorts it, and routes anything actionable to the right teammate.',
       instructions: 'For each new item: say what it is, who it is for, and how urgent it is in one line. Hand actionable items to the right teammate with delegate_task. Stay quiet (NO_UPDATE in routines) when nothing needs attention.' },
   ];
+  const ROUTINE_TEMPLATES = [
+    { key: 'digest', label: 'Daily digest', title: 'Daily digest', notify: 'always', schedule: { type: 'daily', time: '17:00', days: [1, 2, 3, 4, 5] },
+      instructions: 'Check in with the team (task_list scope all, include_done) and write a short end-of-day digest: what got done today, what is still open and with whom, and anything that needs me tomorrow. Group by client or project.' },
+    { key: 'brief', label: 'Morning brief', title: 'Morning brief', notify: 'smart', schedule: { type: 'daily', time: '08:00', days: [1, 2, 3, 4, 5] },
+      instructions: 'Review your memory, open tasks and anything new in your working folder. Tell me in five bullets or fewer what needs my attention today, most urgent first.' },
+    { key: 'intake', label: 'Folder intake', title: 'Folder intake', notify: 'smart', schedule: { type: 'folder', path: '' },
+      instructions: 'New files arrived. For each one: say what it is and whether it needs action. Hand actionable work to the right teammate with delegate_task. If nothing needs me, reply NO_UPDATE.' },
+  ];
   const COLORS = ['#4f6bed', '#0e9f6e', '#d97706', '#db2777', '#7c3aed', '#0891b2', '#dc2626', '#65a30d', '#475569'];
   const DAYN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -1064,6 +1072,7 @@
     const p2 = (n) => String(n).padStart(2, '0');
     const at = s.at || soon.getFullYear() + '-' + p2(soon.getMonth() + 1) + '-' + p2(soon.getDate()) + 'T' + p2(soon.getHours()) + ':' + p2(soon.getMinutes());
     const m = modal('<div class="modal-head"><h3>' + (isNew ? 'New routine' : 'Edit routine') + '</h3><button class="icon-btn" data-m="x">✕</button></div><div class="modal-body">' +
+      (isNew ? '<div class="field"><span>Start from</span><div style="display:flex;gap:6px;flex-wrap:wrap">' + ROUTINE_TEMPLATES.map((t) => '<button class="btn sm" data-rtpl="' + t.key + '">' + esc(t.label) + '</button>').join('') + '</div></div>' : '') +
       '<div class="cols">' + field('Bot', '<select name="botId">' + opts(S.bots.map((b) => [b.id, b.name]), r.botId) + '</select>') + field('Name', '<input type="text" name="title" maxlength="80" value="' + esc(r.title) + '" placeholder="e.g. Morning client check">') + '</div>' +
       field('Instructions', '<textarea name="instructions" rows="5" placeholder="What the bot should do each time it runs.">' + esc(r.instructions) + '</textarea>') +
       '<div class="cols">' + field('When', '<select name="type">' + opts([['daily', 'Daily at a time'], ['interval', 'Every N minutes'], ['once', 'Once'], ['folder', 'When files change in a folder'], ['webhook', 'When a webhook is called']], s.type) + '</select>') +
@@ -1079,6 +1088,17 @@
     sync();
     m.querySelector('[name=type]').addEventListener('change', sync);
     m.addEventListener('click', async (e) => {
+      const tp = e.target.closest('[data-rtpl]');
+      if (tp) {
+        const t = ROUTINE_TEMPLATES.find((x) => x.key === tp.dataset.rtpl);
+        const set = (n, v) => { const el = m.querySelector('[name=' + n + ']'); if (el && v !== undefined) el.value = v; };
+        set('title', t.title); set('instructions', t.instructions); set('notify', t.notify); set('type', t.schedule.type);
+        if (t.schedule.time) set('time', t.schedule.time);
+        if (t.schedule.days) $$('.days input', m).forEach((x) => { x.checked = t.schedule.days.includes(+x.value); });
+        sync();
+        $$('[data-rtpl]', m).forEach((x) => x.classList.toggle('primary', x === tp));
+        return;
+      }
       const a = e.target.closest('[data-m]');
       if (!a) return;
       if (a.dataset.m === 'x') return closeModal();
@@ -1128,6 +1148,7 @@
         field('Claude Code path', '<input type="text" name="claudePath" value="' + esc(c.claudePath) + '" placeholder="Auto-detect" style="font-family:var(--mono)">', 'Leave empty to find it automatically. Bots use your Claude Code login.') +
         '<div class="cols">' + field('Default model', '<input type="text" name="defaultModel" value="' + esc(c.defaultModel) + '" list="model-list"><datalist id="model-list"><option value="opus"><option value="sonnet"><option value="haiku"><option value="fable"></datalist>', 'An alias (opus, sonnet, haiku, fable) or a full model id.') +
         field('Default permissions', '<select name="defaultPermission">' + opts(Object.entries(PERMS).map(([k, v]) => [k, v[0]]), c.defaultPermission) + '</select>') + '</div>' +
+        '<label class="field inline"><input type="checkbox" name="lowPriority"' + (c.lowPriority !== false ? ' checked' : '') + '><span>Run bots at low priority (keeps the computer responsive while they work)</span></label>' +
         field('Tool connection', '<select name="mcpTransport">' + opts([['http', 'Built in (lighter, recommended)'], ['stdio', 'Separate helper process (compatibility)']], c.mcpTransport) + '</select>', 'How bots reach Bullpen\'s tools. Switch only if an older Claude Code can\'t connect.') +
       '</div>' +
       '<div data-pane="limits" class="hidden"><div class="note">Bots that talk to bots can loop. These limits keep usage in check. A bot that fails 3 turns in a row is paused.</div><div class="cols">' +
@@ -1245,6 +1266,14 @@
     if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
     else if (mod && e.shiftKey && e.key.toLowerCase() === 'i') { e.preventDefault(); togglePane(); }
     else if (mod && e.key === ',') { e.preventDefault(); settingsModal(); }
+    else if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !$('.overlay')) {
+      // Alt+↑/↓ moves through the chats in sidebar order.
+      e.preventDefault();
+      const order = $$('#side .side-scroll [data-ch]').map((r) => r.dataset.ch);
+      const i = order.indexOf(V.ch);
+      const next = order[(i + (e.key === 'ArrowDown' ? 1 : -1) + order.length) % order.length];
+      if (next) go(next);
+    }
     else if (e.key === 'Escape') { if ($('.menu')) closeMenu(); else if ($('.overlay')) closeModal(); }
   });
 

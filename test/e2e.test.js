@@ -631,6 +631,16 @@ test('approvals answered after the bot moved on: card stays open, approval gives
   await T.api('DELETE', '/api/bots/' + b.id);
 });
 
+test('bots run at low CPU priority by default', async () => {
+  const ch = 'dm:' + chief.id;
+  const before = T.calls().length;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'prio check\n@@sleep 300' });
+  await T.waitFor(() => T.calls().length > before, 15000, 'turn');
+  await idle(chief.id);
+  const c = T.calls()[T.calls().length - 1];
+  if (process.platform !== 'win32') assert.ok(c.priority >= 10, 'nice >= 10, got ' + c.priority);
+});
+
 test('security settings: key rotation, webhook rate limit, audit of settings changes', async () => {
   const before = (await T.api('GET', '/api/security')).data;
   assert.ok(before.accessKey && before.openUrl.includes('/#key='), 'the key travels in the URL fragment, never sent to the server');

@@ -28,9 +28,11 @@ if (argv.includes('--help')) {
 const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 const dir = process.env.FAKE_CLAUDE_DIR || path.join(os.tmpdir(), 'fake-claude');
 fs.mkdirSync(dir, { recursive: true });
+let priority = null;
+try { priority = require('os').getPriority(process.pid); } catch {}
 let flagSettings = null;
 try { if (opt('--settings')) flagSettings = JSON.parse(fs.readFileSync(opt('--settings'), 'utf8')); } catch {}
-fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ argv, cwd: process.cwd(), settings: flagSettings }) + '\n');
+fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ argv, cwd: process.cwd(), settings: flagSettings, priority }) + '\n');
 
 const out = (ev) => process.stdout.write(JSON.stringify(ev) + '\n');
 

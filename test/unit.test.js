@@ -173,8 +173,11 @@ test('a slow folder check never fires for an edited routine or a file still chan
     s.watchers.set(r.id, w3);
     s.folderFire(r.id);
     await new Promise((res) => setTimeout(res, 250));
-    w3.lastEventAt = Date.now(); // a write arrives during the check
-    await new Promise((res) => setTimeout(res, 300));
+    w3.lastEventAt = Date.now(); // a write arrives during the check (no other timer is pending)
+    await new Promise((res) => setTimeout(res, 200));
     assert.strictEqual(fired.length, 0, 'not reported while still changing');
+    await new Promise((res) => setTimeout(res, 1200)); // quiet period (300 ms) + the next check (400 ms)
+    assert.strictEqual(fired.length, 1, 'reported once things went quiet, never stranded');
+    assert.match(fired[0], /copying\.bin/);
   } finally { fs.promises.access = realAccess; s.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
 });

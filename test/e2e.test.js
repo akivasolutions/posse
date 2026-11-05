@@ -52,6 +52,7 @@ test('a direct message gets a reply and the session persists', async () => {
   for (const t of ['Read', 'Grep', 'Glob', 'WebFetch']) assert.ok(!allowed.includes(t), t + ' is not pre-approved');
   const lastCall = T.calls()[T.calls().length - 1];
   assert.ok(lastCall.settings && lastCall.settings.permissions.deny.includes('Edit(//**/.claude/**)'), 'bots can never write Claude Code settings');
+  assert.ok(lastCall.settings.permissions.deny.includes('Edit(//**/.claude/settings*.json)'));
   assert.strictEqual(last[last.indexOf('--permission-mode') + 1], 'default');
   assert.strictEqual(last[last.indexOf('--permission-prompt-tool') + 1], 'mcp__bullpen__approval_prompt');
 });
@@ -841,4 +842,17 @@ test('a deleted bot\'s question in a group chat is closed when answered', async 
   assert.strictEqual(r.status, 409);
   assert.strictEqual((await T.msgs(ch)).find((m) => m.id === q.id).card.status, 'answered');
   await T.api('DELETE', '/api/rooms/' + room.id);
+});
+
+test('trusting a folder never lets a bot write Claude Code settings', async () => {
+  const b = (await T.api('POST', '/api/bots', { name: 'Trusting', trustFolderSettings: true, useMyClaudeSettings: true })).data.bot;
+  const before = T.calls().length;
+  await T.api('POST', '/api/channels/dm:' + b.id + '/messages', { text: 'hi' });
+  await T.waitFor(() => T.calls().length > before, 15000, 'turn');
+  await idle(b.id);
+  const c = T.calls().filter((x) => x.cwd && x.cwd.includes(b.id)).pop();
+  const deny = c.settings.permissions.deny;
+  for (const r of ['Edit(//**/.claude/settings*.json)', 'Edit(~/.claude/**)', 'Edit(~/.claude.json)']) assert.ok(deny.includes(r), r);
+  assert.ok(!deny.includes('Edit(//**/.claude/**)'), 'trusted bots may still be asked about commands/agents/skills');
+  await T.api('DELETE', '/api/bots/' + b.id);
 });

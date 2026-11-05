@@ -495,11 +495,13 @@
         return h + '</div>';
       }
       case 'approval': {
-        const raw = Object.entries(c.input || {}).map(([k, v]) => k + ': ' + v).join('\n');
+        const raw = Object.entries(c.input || {}).map(([k, v]) => k + ': ' + v).join('\n').replace(/\r\n/g, '\n');
         // Make direction overrides and zero-width characters visible, so text can't be disguised.
-        const input = raw.replace(/(?!\uFE0F)[\p{Default_Ignorable_Code_Point}\u061c\u202a-\u202e\u2066-\u2069]/gu,
+        // Show every character that could hide or reorder text: invisible ones, bidi controls, lone
+        // carriage returns and other control characters (the HTML parser turns \r into a line break).
+        const input = raw.replace(/(?!\uFE0F)[\p{Default_Ignorable_Code_Point}\u061c\u202a-\u202e\u2066-\u2069\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/gu,
           (ch) => '⟦U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0') + '⟧');
-        const lines = raw.split('\n').length;
+        const lines = raw.split(/\r\n?|[\n\v\f\x85\u2028\u2029]/).length;
         const sizeNote = c.fullSize ? c.fullSize.toLocaleString() + ' characters in all · <b>only the first part is shown</b>' : raw.length.toLocaleString() + ' characters';
         let h = '<div class="card approval"><h4>' + (c.escalation ? '🛡 ' + esc(c.tool) + '?' : '⚠️ Approve ' + esc(c.tool) + '?') + '</h4>' +
           '<div class="k">' + lines + ' line' + (lines === 1 ? '' : 's') + ' · ' + sizeNote + (raw.length > 600 || lines > 12 ? ' · <button class="btn sm" data-act="expand">Show all</button>' : '') + '</div>' +
@@ -1024,7 +1026,7 @@
         '<details><summary style="cursor:pointer;color:var(--muted)">Advanced</summary><div style="margin-top:10px">' +
         field('Custom model id', '<input type="text" name="modelCustom" value="' + esc(MODELS.some((m) => m[0] === b.model) ? '' : b.model) + '" placeholder="Overrides the model picker, e.g. claude-opus-5-5" style="font-family:var(--mono)">') +
         '<label class="field inline"><input type="checkbox" name="trustFolderSettings"' + (b.trustFolderSettings ? ' checked' : '') + '><span>Trust this folder\'s Claude Code settings</span></label>' +
-        '<small style="display:block;color:var(--muted);margin:-8px 0 12px">Off (recommended): permission rules saved inside the working folder (.claude/settings*.json) are ignored, so a folder can\'t pre-approve commands. Turn on only for folders you control.</small>' +
+        '<small style="display:block;color:var(--muted);margin:-8px 0 12px">Off (recommended): permission rules saved inside the working folder (.claude/settings*.json) are ignored, so a folder can\'t pre-approve commands. Turn on only for folders you control. Either way, bots can never change Claude Code settings files; with this on, they may edit a project\'s .claude commands, agents and skills, with your approval.</small>' +
         '<label class="field inline"><input type="checkbox" name="useMyClaudeSettings"' + (b.useMyClaudeSettings ? ' checked' : '') + '><span>Use my Claude Code settings and connectors</span></label>' +
         '<small style="display:block;color:var(--muted);margin:-8px 0 12px">Off (recommended): the bot gets only Bullpen tools plus the servers below, and your personal allow-rules don\'t apply to it. On: it also loads all your settings and every MCP connector you have set up.</small>' +
         field('Extra MCP servers (JSON)', '<textarea name="mcpServers" rows="5" style="font-family:var(--mono);font-size:12px" placeholder=\'{"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]}}\'>' + esc(Object.keys(b.mcpServers || {}).length ? JSON.stringify(b.mcpServers, null, 2) : '') + '</textarea>', 'Connectors for this bot only, in Claude Code\'s mcpServers format.') +

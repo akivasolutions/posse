@@ -79,7 +79,7 @@ Browser ⇄ Bullpen (Node) ── one turn ──▶ claude -p --resume <bot's s
 
 - **One turn** is one `claude -p --output-format stream-json` run in the bot's working folder. It resumes the bot's session, with the waiting inputs for that chat batched in. Each input is labeled, for example `[From you]`, `[Task #12 from @chief]`, `[Report on task #12 …]`, `[Message from @x]`, `[Group chat …]` or `[Routine …]`.
 - **Bullpen's tools** reach the bot over MCP. Bullpen itself serves them at `/mcp`, protected by a per-turn token, so a turn needs no extra helper process. A separate-process fallback is in Settings.
-- **Approvals** use Claude Code's `--permission-prompt-tool`. Claude Code stops waiting on a permission request after 5 minutes, so Bullpen answers within 4½. If you haven't decided by then, it tells the bot to move on, keeps the card open, and gives the bot a one-time permission for exactly that action when you approve.
+- **Approvals** use Claude Code's `--permission-prompt-tool`. Cards show everything they approve, in full; anything too large to review is refused. Claude Code stops waiting on a permission request after 5 minutes, so Bullpen answers within 4½. If you haven't decided by then, it tells the bot to move on, keeps the card open, and gives the bot a one-time permission for exactly that action when you approve.
 - **Long conversations:** when instructions, the team, memory or skills change, the bot gets a `[Context update]` on its next turn. When its context passes the session limit (150k tokens by default), it saves notes and starts fresh with its memory and a recap of the chat.
 
 ### Permission levels (per bot)
@@ -111,7 +111,7 @@ Bullpen is built for machines you share with other people and for bots that read
 - **Access key:**
   - every request needs it, sent as a header from the browser's storage for this exact address;
   - other programs on other local ports can't see it, and there is no cookie to steal;
-  - things the browser loads on its own, such as pages, files and the live update stream, use a read-only token that changes daily;
+  - each page or file link carries its own signed token that opens only that one item and changes daily, the live update stream uses a separate read-only token, and exports and backups use one-time download tickets;
   - Settings → Security shows the key and makes a new one, which signs out every other browser.
 - **Private data folder:**
   - the default is `~/.bullpen`, readable only by your account;

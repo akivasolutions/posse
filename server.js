@@ -254,9 +254,8 @@ route('GET', '/api/channels/:ch/export', async (req, res, p) => {
   const title = c.kind === 'dm' ? c.bot.name : c.room.name;
   const name = (title.replace(/[^\w .-]+/g, '').trim() || 'chat') + '.md';
   res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'content-disposition': 'attachment; filename*=UTF-8\'\'' + encodeURIComponent(name), 'cache-control': 'no-store', ...SEC_HEADERS });
-  const { once } = require('events');
-  await app.exportChannel(p.ch, async (chunk) => { if (!res.write(chunk)) await once(res, 'drain'); });
-  res.end();
+  const { put } = require('./lib/backup');
+  try { await app.exportChannel(p.ch, (chunk) => put(res, chunk)); res.end(); } catch { res.destroy(); }
   return undefined;
 });
 route('POST', '/api/channels/:ch/messages/:id/retry', (req, res, p) => app.retryTurn(p.ch, p.id));
@@ -295,6 +294,25 @@ route('GET', '/api/backup', async (req, res) => {
   return undefined;
 });
 route('GET', '/api/whoami', () => ({ ok: true, vt: viewToken() }));
+// A one-time download ticket (60 s) for an export or backup, so the browser can save the file
+// directly instead of holding it in memory. Single use: a leaked ticket is worthless.
+const tickets = new Map();
+route('POST', '/api/download-ticket', async (req) => {
+  const b = await json(req);
+  const target = String(b.path || '');
+  if (target !== '/api/backup' && !/^\/api\/channels\/[^/]+\/export$/.test(target)) throw httpError(400, 'Not downloadable');
+  const t = crypto.randomBytes(24).toString('base64url');
+  tickets.set(t, { target, exp: Date.now() + 60e3 });
+  for (const [k, v] of tickets) if (v.exp < Date.now()) tickets.delete(k);
+  return { url: target + '?dl=' + t };
+});
+function ticketOk(pathname, url) {
+  const t = url.searchParams.get('dl');
+  const v = t && tickets.get(t);
+  if (!v) return false;
+  tickets.delete(t);
+  return v.exp > Date.now() && v.target === pathname;
+}
 route('GET', '/api/security', () => ({ accessKey: secret.accessKey, openUrl: openUrl(), dataDir: app.store.dir, audit: app.readAudit(200) }));
 route('POST', '/api/security/rotate-key', () => {
   secret = { accessKey: crypto.randomBytes(18).toString('base64url') };
@@ -427,7 +445,8 @@ async function handle(req, res) {
   const eventsWithView = req.method === 'GET' && pathname === '/api/events' && viewOk(url);
   const rm = req.method === 'GET' && /^\/(pages|files)\/([\w-]+)/.exec(pathname);
   const resourceWithToken = rm && resOk(rm[1], rm[2], url);
-  if (!isStatic && !openRoute && !keyOk(req) && !eventsWithView && !resourceWithToken) {
+  const download = req.method === 'GET' && (pathname === '/api/backup' || /^\/api\/channels\/[^/]+\/export$/.test(pathname)) && url.searchParams.get('dl') && ticketOk(pathname, url);
+  if (!isStatic && !openRoute && !keyOk(req) && !eventsWithView && !resourceWithToken && !download) {
     authFailed();
     if (pathname.startsWith('/api/')) return send(res, 401, { error: 'Sign in required' });
     return send(res, 401, 'Sign in required. Open Bullpen from its sign-in link.');
@@ -447,7 +466,7 @@ async function handle(req, res) {
         const out = await r.handler(req, res, params, url);
         if (out !== undefined && !res.headersSent) send(res, 200, out);
       } catch (e) {
-        if (!e.status) console.error('[bullpen]', req.method, pathname, e);
+        if (!e.status) console.error('[bullpen]', req.method, pathname.replace(/^(\/api\/hooks\/[^/]+\/).*/, '$1…'), e);
         if (!res.headersSent) send(res, e.status || 500, { error: e.message || 'Server error' });
       }
       return;

@@ -79,19 +79,18 @@
   const authH = () => ({ Authorization: 'Bearer ' + KEY, 'X-Bullpen': '1' });
   const vt = (url) => url + (url.includes('?') ? '&' : '?') + 'vt=' + encodeURIComponent(VT);
   // Exports and backups need the key itself, so they are fetched (with the header) and saved from memory.
-  async function downloadAuthed(url, fallbackName) {
-    const r = await fetch(url, { headers: authH() });
-    if (!r.ok) { toast('Download failed (' + r.status + ')', true); return; }
-    const cd = r.headers.get('content-disposition') || '';
-    const m = /filename\*=UTF-8''([^;]+)|filename="([^"]+)"/.exec(cd);
-    const name = m ? decodeURIComponent(m[1] || m[2]) : fallbackName;
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  // Exports and backups: ask for a one-time ticket with the key, then let the browser download
+  // the file directly (nothing is held in this page's memory).
+  async function downloadAuthed(url) {
+    try {
+      const r = await api('POST', '/api/download-ticket', { path: url });
+      const a = document.createElement('a');
+      a.href = r.url;
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => a.remove(), 1000);
+    } catch (e) { toast('Download failed: ' + e.message, true); }
   }
 
   function signIn(msg) {
@@ -134,7 +133,9 @@
     const el = document.createElement('div');
     el.className = 'toast' + (err ? ' err' : '');
     el.textContent = text;
-    $('#toasts').appendChild(el);
+    let box = $('#toasts');
+    if (!box) { box = document.createElement('div'); box.id = 'toasts'; document.body.appendChild(box); }
+    box.appendChild(el);
     setTimeout(() => el.remove(), err ? 6000 : 3000);
   }
   async function attempt(fn) { try { return await fn(); } catch (e) { toast(e.message, true); return null; } }
@@ -494,7 +495,8 @@
       case 'approval': {
         const input = Object.entries(c.input || {}).map(([k, v]) => k + ': ' + v).join('\n');
         let h = '<div class="card approval"><h4>' + (c.escalation ? '🛡 ' + esc(c.tool) + '?' : '⚠️ Approve ' + esc(c.tool) + '?') + '</h4>' +
-          (c.escalation ? '<div class="k">That bot has more permissions than the one asking. Approve only if this is what you want done.</div>' : '') + '<pre class="input">' + esc(input) + '</pre>';
+          (c.escalation === 'shared' ? '<div class="k">Every bot reads this, including ones with more permissions than the bot asking. Approve only if you want it saved as shown.</div>'
+            : c.escalation ? '<div class="k">That bot has more permissions than the one asking. Approve only if this is exactly what you want done; everything it will receive is shown below.</div>' : '') + '<pre class="input">' + esc(input) + '</pre>';
         if (st === 'pending' || st === 'later') {
           if (st === 'later') h += '<div class="k" style="margin-bottom:4px">The bot moved on while waiting. Answer any time: approving gives it a new turn to do this.</div>';
           h += '<div class="row-actions"><button class="btn sm primary" data-act="ap" data-d="allow">Allow once</button>' +
@@ -831,7 +833,7 @@
     else if (p === 'reset' && b) {
       if (await confirmBox('Start a fresh session for ' + b.name + '?', 'The bot keeps its memory and this chat history. Its Claude context starts over, with a recap of the recent chat on the next turn. Use this when it seems confused or its context is very large.', 'New session', false)) attempt(() => api('POST', '/api/bots/' + b.id + '/reset-session'));
     } else if (p === 'clear' && b) attempt(() => api('POST', '/api/bots/' + b.id + '/clear-queue'));
-    else if (p === 'export' && b) downloadAuthed(chUrl('dm:' + b.id) + '/export', b.name + '.md');
+    else if (p === 'export' && b) downloadAuthed(chUrl('dm:' + b.id) + '/export');
     else if (p === 'add-routine' && b) routineModal(null, b.id);
     else if (p === 'save-mem' && b) { const ok = await attempt(() => api('PUT', '/api/bots/' + b.id + '/memory', { text: $('#mem-text').value })); if (ok) { V.dirtyMem = null; toast('Memory saved'); } }
     else if (p === 'edit-room' && r) roomModal(r);
@@ -1235,12 +1237,12 @@
         if (r) {
           KEY = r.accessKey; VT = r.vt;
           try { localStorage.setItem(KEY_STORE, KEY); } catch {}
-          connect();
+          await relink();
           toast('New access key made');
           settingsModal('security');
         }
       }
-      else if (a.dataset.m === 'backup') { a.disabled = true; a.textContent = 'Preparing…'; await downloadAuthed('/api/backup', 'bullpen-backup.tar.gz'); a.disabled = false; a.textContent = '⤓ Download backup (.tar.gz)'; }
+      else if (a.dataset.m === 'backup') downloadAuthed('/api/backup');
       else if (a.dataset.m === 'signout') { try { localStorage.removeItem(KEY_STORE); } catch {} closeModal(); signIn(''); }
       else if (a.dataset.m === 'notify') { if (typeof Notification !== 'undefined') { await Notification.requestPermission(); a.textContent = Notification.permission === 'granted' ? 'Enabled ✓' : 'Blocked in browser settings'; } }
       else if (a.dataset.m === 'save') {
@@ -1300,7 +1302,7 @@
     if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
     else if (mod && e.shiftKey && e.key.toLowerCase() === 'i') { e.preventDefault(); togglePane(); }
     else if (mod && e.key === ',') { e.preventDefault(); settingsModal(); }
-    else if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !$('.overlay')) {
+    else if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !$('.overlay') && !e.target.closest('input, textarea, select, [contenteditable]')) {
       // Alt+↑/↓ moves through the chats in sidebar order.
       e.preventDefault();
       const order = $$('#side .side-scroll [data-ch]').map((r) => r.dataset.ch);
@@ -1340,6 +1342,7 @@
     switch (ev.type) {
       case 'bot': {
         const prev = botById(ev.bot.id);
+        if (prev && !('mcpServers' in ev.bot)) ev.bot.mcpServers = prev.mcpServers;
         upsert(S.bots, ev.bot);
         renderSide();
         if (V.ch === 'dm:' + ev.bot.id || (V.ch && V.ch.startsWith('room:'))) { renderHead(); renderLive(); }
@@ -1408,6 +1411,17 @@
     es.onopen = async () => { if (dropped) { dropped = false; V.msgs = {}; await refreshState(); renderMain(); } };
   }
 
+  // Page and file links are signed for a day or two; when tokens roll over (or the key changes),
+  // fetch everything again so links in this tab keep working.
+  async function relink() {
+    V.msgs = {};
+    await refreshState();
+    connect();
+    if (V.pane && V.pane.startsWith('page:')) { delete $('#pane').dataset.page; }
+    renderMain();
+    renderPane();
+  }
+
   async function refreshState() {
     VT = (await api('GET', '/api/whoami')).vt;
     const st = await api('GET', '/api/state');
@@ -1427,7 +1441,7 @@
     }
     if (!KEY) return signIn('');
     try { await refreshState(); } catch (e) { if (KEY && e.message !== 'Sign in required') document.body.innerHTML = '<div class="empty"><h3>Can\'t reach Bullpen</h3><p>' + esc(e.message) + '</p></div>'; return; }
-    setInterval(() => { api('GET', '/api/whoami').then((r) => { if (r.vt !== VT) { VT = r.vt; connect(); } }).catch(() => {}); }, 3600e3);
+    setInterval(() => { api('GET', '/api/whoami').then((r) => { if (r.vt !== VT) relink(); }).catch(() => {}); }, 3600e3);
     go(fromHash(), { replace: true });
     connect();
   })();

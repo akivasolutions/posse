@@ -4,3 +4,5 @@ data/
 .DS_Store
 Thumbs.db
 tasks/
+.update/
+.bullpen-version

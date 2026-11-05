@@ -6,11 +6,12 @@
   "bin": { "bullpen": "server.js" },
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/unit.test.js test/store.test.js test/e2e.test.js test/lifecycle.test.js"
+    "test": "node --test test/unit.test.js test/store.test.js test/e2e.test.js test/lifecycle.test.js test/update.test.js"
   },
   "engines": { "node": ">=18.17" },
   "keywords": ["claude", "claude-code", "agents", "multi-agent", "bots", "assistant", "local-first"],
   "author": "youngharold",
+  "repository": { "type": "git", "url": "https://github.com/youngharold/bullpen" },
   "license": "MIT",
   "dependencies": {}
 }

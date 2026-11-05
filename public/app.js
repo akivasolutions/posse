@@ -1230,8 +1230,9 @@
         '<div class="field"><span>Recent security events</span><div id="sec-audit" style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px;font-size:12.5px"><div style="padding:8px;color:var(--muted)">Loading…</div></div></div>' +
       '</div>' +
       '<div data-pane="about" class="hidden"><p><b>Bullpen</b> — a local team of persistent AI bots, powered by the Claude Code CLI. Open source, MIT license.</p>' +
-        '<dl class="kv"><dt>Data folder</dt><dd style="font:12px var(--mono)">' + esc(S.dataDir) + '</dd><dt>Today</dt><dd>' + (S.usage.today.turns || 0) + ' turns · $' + (S.usage.today.costUsd || 0).toFixed(2) + ' API-equivalent</dd></dl>' +
+        '<dl class="kv"><dt>Version</dt><dd>' + esc(S.version || '') + (S.build ? ' · ' + esc(S.build) : '') + '</dd><dt>Data folder</dt><dd style="font:12px var(--mono)">' + esc(S.dataDir) + '</dd><dt>Today</dt><dd>' + (S.usage.today.turns || 0) + ' turns · $' + (S.usage.today.costUsd || 0).toFixed(2) + ' API-equivalent</dd></dl>' +
         '<p><button class="btn sm" data-m="backup">⤓ Download backup (.tar.gz)</button></p>' +
+        '<p style="color:var(--muted);font-size:12.5px">To update: in the Bullpen folder, double-click <b>update.cmd</b> (Windows) or <b>update.command</b> (macOS), or run <code>node update.js</code>. Your bots, chats and settings are kept.</p>' +
         '<p style="color:var(--muted);font-size:12.5px">Everything (chats, memory, pages, routines) is plain files in the data folder. Back it up like any folder. Keyboard: ⌘/Ctrl+K search · ⌘/Ctrl+Shift+I details · ⌘/Ctrl+, settings.</p></div>' +
       '</div><div class="modal-foot"><span class="grow"></span><button class="btn" data-m="x">Close</button><button class="btn primary" data-m="save">Save</button></div>', { wide: true });
     let sec = null;

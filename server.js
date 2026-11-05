@@ -32,6 +32,23 @@ function defaultData() {
 }
 const DATA = path.resolve(arg('data', '') || defaultData());
 const PUBLIC = path.join(__dirname, 'public');
+// Which build this is: the commit the updater installed, or a git checkout's commit.
+function readBuild() {
+  try { const v = JSON.parse(fs.readFileSync(path.join(__dirname, '.bullpen-version'), 'utf8')); if (/^[0-9a-f]{7,64}$/.test(v.commit)) return v.commit; } catch {}
+  try {
+    const g = path.join(__dirname, '.git');
+    let head = fs.readFileSync(path.join(g, 'HEAD'), 'utf8').trim();
+    const ref = /^ref: (refs\/[\w./-]+)$/.exec(head);
+    if (ref) {
+      try { head = fs.readFileSync(path.join(g, ...ref[1].split('/')), 'utf8').trim(); } catch {
+        head = (fs.readFileSync(path.join(g, 'packed-refs'), 'utf8').split('\n').find((l) => l.endsWith(' ' + ref[1])) || '').split(' ')[0];
+      }
+    }
+    if (/^[0-9a-f]{40,64}$/.test(head)) return head;
+  } catch {}
+  return '';
+}
+const BUILD = readBuild();
 const BASE = 'http://127.0.0.1:' + PORT;
 
 const MIME = {
@@ -62,6 +79,9 @@ function same(a, b) {
   const x = Buffer.from(String(a || '')); const y = Buffer.from(String(b || ''));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
+// The start and update scripts read the key from the data folder and prove they have it with an
+// HMAC instead of sending it, so whatever else might be listening on the port never learns it.
+const proof = (msg) => crypto.createHmac('sha256', secret.accessKey).update(msg).digest('base64url');
 function viewToken(day = Math.floor(Date.now() / 86400e3)) {
   return crypto.createHmac('sha256', secret.accessKey).update('view:' + day).digest('base64url').slice(0, 32);
 }
@@ -201,7 +221,7 @@ function route(method, pattern, handler, opts = {}) {
   routes.push({ method, re, keys, handler, open: !!opts.open });
 }
 
-route('GET', '/api/state', () => { const st = app.publicState(); st.pages = st.pages.map(decoPage); return st; });
+route('GET', '/api/state', () => { const st = app.publicState(); st.pages = st.pages.map(decoPage); st.version = pkg.version; st.build = BUILD.slice(0, 7); return st; });
 
 route('GET', '/api/events', (req, res) => {
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
@@ -295,6 +315,28 @@ route('GET', '/api/backup', async (req, res) => {
   return undefined;
 });
 route('GET', '/api/whoami', () => ({ ok: true, vt: viewToken() }));
+// "Is this my Bullpen?" for the start and update scripts: answers a fresh challenge with a proof
+// of the access key (never the key itself).
+route('GET', '/api/ping', (req, res, p, url) => {
+  const n = String(url.searchParams.get('n') || '');
+  if (!/^[\w-]{16,64}$/.test(n)) throw httpError(400, 'Bad challenge');
+  return { bullpen: true, proof: proof('ping:' + n) };
+}, { open: true });
+// The update script stops Bullpen with a signed request that is good for one minute, once.
+const usedStops = new Set();
+route('POST', '/api/stop', async (req) => {
+  const b = (await json(req, 4096)) || {};
+  const t = Number(b.t);
+  if (!Number.isSafeInteger(t) || Math.abs(Date.now() - t) > 60e3 || usedStops.has(t) || !same(b.sig, proof('stop:' + t))) {
+    authFailed();
+    throw httpError(403, 'Refused');
+  }
+  usedStops.add(t);
+  app.audit('stopped', { detail: b.reason === 'update' ? 'for an update' : 'on request' });
+  console.log('\n  Bullpen is stopping' + (b.reason === 'update' ? ' for an update; it starts again in the update window.' : '.') + '\n');
+  setTimeout(shutdown, 50);
+  return { ok: true };
+}, { open: true });
 // A one-time download ticket (60 s) for an export or backup, so the browser can save the file
 // directly instead of holding it in memory. Single use: a leaked ticket is worthless.
 const tickets = new Map();
@@ -444,7 +486,8 @@ async function handle(req, res) {
   //  - one page or file: the access key or that resource's own token;
   //  - everything else (including exports and backups): the access key.
   const isStatic = req.method === 'GET' && !pathname.startsWith('/api/') && !pathname.startsWith('/pages/') && !pathname.startsWith('/files/');
-  const openRoute = req.method === 'POST' && (pathname === '/api/mcp/call' || pathname.startsWith('/api/hooks/'));
+  const openRoute = (req.method === 'POST' && (pathname === '/api/mcp/call' || pathname.startsWith('/api/hooks/') || pathname === '/api/stop')) ||
+    (req.method === 'GET' && pathname === '/api/ping');
   const eventsWithView = req.method === 'GET' && pathname === '/api/events' && viewOk(url);
   const rm = req.method === 'GET' && /^\/(pages|files)\/([\w-]+)/.exec(pathname);
   const resourceWithToken = rm && resOk(rm[1], rm[2], url);
@@ -526,15 +569,49 @@ server.on('error', (e) => {
   process.exit(1);
 });
 
-app.load();
-server.listen(PORT, HOST, () => {
+// One Bullpen per data folder. If this folder's Bullpen is already running (on any port), open
+// that one instead of starting a second copy, which would fight over the same files.
+function provesKey(port) {
+  const n = crypto.randomBytes(18).toString('base64url');
+  return new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/ping?n=' + n, timeout: 2000 }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { if (body.length < 4096) body += c; });
+      res.on('end', () => { try { resolve(same(JSON.parse(body).proof, proof('ping:' + n))); } catch { resolve(false); } });
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(false));
+  });
+}
+async function alreadyRunning() {
+  const last = (app.store.readJSON('server.json', null) || {}).port;
+  for (const port of [...new Set([last, PORT])]) if (Number.isInteger(port) && port > 0 && port < 65536 && await provesKey(port)) return port;
+  return 0;
+}
+
+(async () => {
+  const running = await alreadyRunning();
+  if (running) {
+    const u = 'http://127.0.0.1:' + running + '/#key=' + encodeURIComponent(secret.accessKey);
+    console.log('\n  Bullpen is already running' + (process.argv.includes('--open') ? '; opened it in your browser' : '') + ':\n  ' + u + '\n');
+    if (process.argv.includes('--open')) openBrowser(u);
+    return;
+  }
+  // The data is loaded only once the port is ours, so a copy that can't start never touches it.
+  server.listen(PORT, HOST, onListening);
+})();
+
+function onListening() {
+  app.load();
+  app.store.writeJSON('server.json', { pid: process.pid, port: PORT, startedAt: Date.now() });
   const info = app.publicState().cli;
-  console.log('\n  Bullpen ' + pkg.version + ' — open this link to sign in:\n  ' + openUrl());
+  console.log('\n  Bullpen ' + pkg.version + (BUILD ? ' (' + BUILD.slice(0, 7) + ')' : '') + ' — open this link to sign in:\n  ' + openUrl());
   console.log('  Data:   ' + DATA);
   console.log('  Claude: ' + (info.found ? info.version + ' (' + info.path + ')' : 'NOT FOUND — ' + info.error));
   console.log('');
   if (process.argv.includes('--open')) openBrowser(openUrl());
-});
+}
 
 function openBrowser(u) {
   const cmd = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', u]] : process.platform === 'darwin' ? ['open', [u]] : ['xdg-open', [u]];
@@ -545,6 +622,7 @@ let closing = false;
 async function shutdown() {
   if (closing) return;
   closing = true;
+  try { if ((app.store.readJSON('server.json', null) || {}).pid === process.pid) fs.unlinkSync(app.store.p('server.json')); } catch {}
   app.scheduler.stop();
   server.close();
   for (const c of clients) c.end();

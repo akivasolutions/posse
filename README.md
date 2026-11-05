@@ -28,6 +28,20 @@ You create bots, each with its own name, role, instructions, working folder, mem
 | **Budgets** | Per-bot daily spending cap (API-equivalent cost) plus global limits on turns and hand-offs. |
 | **Templates** | Start a bot as an account manager, researcher, writer, analyst or inbox triage, then edit it to suit. |
 
+## Footprint
+
+Measured with 10 bots and 36,000 messages (six months of history), on a Mac:
+
+| | |
+|---|---|
+| Server memory, idle | about 60 MB |
+| Server memory after opening all 10 chats | about 68 MB (only each chat's latest month is loaded) |
+| Search across all 36,000 messages | about 20 ms |
+| Browser page memory (JavaScript heap) | about 2–2.5 MB, even with 480 messages on screen |
+| Switching to a 3,600-message chat | about 70 ms |
+
+Each running bot turn adds one Claude Code process; *Bots working at once* (Settings → Limits) caps how many run together, and they run at low CPU priority.
+
 ## Requirements
 
 - **Node.js 18.17 or newer** (`node --version`)

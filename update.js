@@ -23,7 +23,7 @@ const MAX_UNPACKED = 200 * 1024 * 1024;
 const MAX_FILES = 5000;
 // Top-level names an update never replaces or removes.
 // Compared without case: Windows and macOS treat ".Git" and ".git" as the same folder.
-const KEEP = new Set(['.git', '.update', '.posse-version', '.posse-id', '.posse-update.sock', '.posse-update.sock.gate', 'data', 'node', 'node_modules']);
+const KEEP = new Set(['.git', '.update', '.posse-version', '.posse-update.lock', '.posse-update.sock', '.posse-update.sock.gate', 'data', 'node', 'node_modules']);
 const kept = (top) => KEEP.has(String(top).toLowerCase());
 // A download must contain these to count as Posse.
 const REQUIRED = ['package.json', 'server.js', 'update.js', 'lib/app.js', 'public/index.html'];
@@ -290,65 +290,85 @@ async function clearTheWay(data, argv) {
   if (Number.isInteger(last.port) && Number.isInteger(last.pid) && last.pid !== process.pid && alive(last.pid) && await connects(last.port, reach(last.host))) throw busy(last.port);
 }
 
-// One update at a time in this folder. An updater holds a local socket that only a running
-// process can answer on, so the operating system frees it when that process ends, however it ends.
-// macOS/Linux: a socket file inside this folder (only its owner can create files there).
-// Windows: a named pipe whose name includes a random id kept in this folder, so another account
-// on the computer can't guess it. If the lock can't be set up at all, the update goes ahead.
-const LOCK_FILE = '.posse-update.sock';
-const ID_FILE = '.posse-id';
-function folderId(app) {
-  const f = path.join(app, ID_FILE);
-  for (let i = 0; i < 20; i++) {
-    try { const id = fs.readFileSync(f, 'utf8').trim(); if (/^[0-9a-f]{32}$/.test(id)) return id; } catch {}
-    try { fs.writeFileSync(f, crypto.randomBytes(16).toString('hex'), { flag: 'wx' }); } catch (e) { if (e.code !== 'EEXIST') return ''; }
-    sleepSync(25); // another updater is writing it right now
+// One update at a time in this folder. The lock lives inside the Posse folder, where other
+// accounts can't create anything, and the operating system releases it when the updater ends,
+// however it ends.
+//   Windows: .posse-update.lock opened in exclusive-share mode (a second open gets EBUSY).
+//   macOS/Linux: a socket .posse-update.sock that only a running updater answers on; a leftover
+//   from a killed updater is taken over, one updater at a time.
+// If the lock can't be set up at all (an unusual file system), the update goes ahead without it.
+const LOCK_FILE = process.platform === 'win32' ? '.posse-update.lock' : '.posse-update.sock';
+const UV_FS_O_EXLOCK = 0x10000000; // libuv: open with exclusive sharing (Windows)
+const lockHooks = { listen: (srv, addr, cb) => srv.listen(addr, cb), mkdir: (p) => fs.mkdirSync(p) }; // tests simulate races
+
+function busyError() { return Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true }); }
+function noLock(e) { say('Note: could not set up the update lock (' + (e.code || e.message) + '); going ahead without it.'); return () => {}; }
+
+async function lockWindows(dir) {
+  const f = path.join(dir, LOCK_FILE);
+  for (let i = 0; ; i++) {
+    try {
+      const fd = fs.openSync(f, fs.constants.O_RDWR | fs.constants.O_CREAT | UV_FS_O_EXLOCK);
+      return () => { try { fs.closeSync(fd); } catch {} };
+    } catch (e) {
+      if (e.code !== 'EBUSY') return noLock(e);
+      if (i >= 15) throw busyError(); // held by another updater (a virus scanner lets go within a second)
+      await sleep(100);
+    }
   }
-  return '';
 }
-function lockAddress(app) {
-  // The real path, so the same folder reached through a link or another spelling shares one lock.
-  let real = path.resolve(app);
-  try { real = fs.realpathSync.native(real); } catch {}
-  const hash = (x) => crypto.createHash('sha256').update(x).digest('hex').slice(0, 32);
-  if (process.platform === 'win32') return '\\\\?\\pipe\\posse-update-' + hash(folderId(app) + '|' + real.toLowerCase());
-  const inFolder = path.join(real, LOCK_FILE);
-  // Socket paths are limited to about 104 bytes; a very deep folder uses the temp folder instead.
-  return Buffer.byteLength(inFolder) < 100 ? inFolder : path.join(os.tmpdir(), 'posse-update-' + hash(real) + '.sock');
+
+// The socket is bound by its short relative name from inside the folder, so a deep folder never
+// hits the ~104-byte socket path limit (and nothing ever goes to a shared temp folder).
+function inFolder(dir, fn) {
+  const prev = process.cwd();
+  process.chdir(dir);
+  try { return fn(); } finally { process.chdir(prev); }
 }
-async function lock(app) {
-  const addr = lockAddress(app);
-  const busy = () => Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true });
-  const unlocked = (e) => { say('Note: could not set up the update lock (' + (e.code || e.message) + '); going ahead without it.'); return () => {}; };
+async function lockSocket(dir) {
+  const taken = (e) => e.code === 'EADDRINUSE' || e.code === 'EEXIST'; // both mean "someone is there"
   const hold = () => new Promise((resolve, reject) => {
     const srv = net.createServer((c) => c.destroy());
     srv.once('error', reject);
-    srv.listen(addr, () => { srv.unref(); resolve(() => srv.close()); });
+    inFolder(dir, () => lockHooks.listen(srv, LOCK_FILE, () => {
+      srv.unref();
+      resolve(() => { try { inFolder(dir, () => srv.close()); } catch {} }); // closing removes the socket file
+    }));
   });
   const answers = () => new Promise((resolve) => {
-    const c = net.connect(addr, () => { c.destroy(); resolve(true); });
+    const c = inFolder(dir, () => net.connect(LOCK_FILE));
+    c.on('connect', () => { c.destroy(); resolve(true); });
     c.on('error', () => resolve(false));
   });
-  const taken = (e) => e.code === 'EADDRINUSE' || e.code === 'EEXIST'; // both mean "someone is there"
-  try { return await hold(); } catch (e) {
-    if (!taken(e)) return unlocked(e);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { return await hold(); } catch (e) { if (!taken(e)) return noLock(e); }
+    if (await answers()) throw busyError();
+    // A leftover from an updater that was killed. Take it over through a "gate" folder that only
+    // one updater can create. A gate older than 10 s was left by a crash: remove it, wait, start over.
+    const gate = path.join(dir, LOCK_FILE + '.gate');
+    try { lockHooks.mkdir(gate); } catch (e) {
+      if (e.code !== 'EEXIST') return noLock(e);
+      let age = 0;
+      try { age = Date.now() - fs.statSync(gate).mtimeMs; } catch {}
+      if (age < 10e3) throw busyError();
+      try { fs.rmdirSync(gate); } catch {}
+      await sleep(300);
+      continue;
+    }
+    try {
+      if (await answers()) throw busyError();
+      try { fs.unlinkSync(path.join(dir, LOCK_FILE)); } catch (e) { if (e.code !== 'ENOENT') return noLock(e); } // not ours to remove
+      try { return await hold(); } catch (e) { if (taken(e)) throw busyError(); return noLock(e); }
+    } finally { try { fs.rmdirSync(gate); } catch {} }
   }
-  if (process.platform === 'win32' || await answers()) throw busy();
-  // A socket file left by an updater that was killed. Take it over, one updater at a time: the
-  // "gate" folder is created atomically; a gate older than 10 s was left by a crash.
-  const gate = addr + '.gate';
-  try { fs.mkdirSync(gate); } catch (e) {
-    if (e.code !== 'EEXIST') return unlocked(e);
-    let age = 0;
-    try { age = Date.now() - fs.statSync(gate).mtimeMs; } catch {}
-    if (age < 10e3) throw busy();
-    try { fs.rmdirSync(gate); fs.mkdirSync(gate); } catch { throw busy(); }
-  }
-  try {
-    if (await answers()) throw busy();
-    try { fs.unlinkSync(addr); } catch {}
-    try { return await hold(); } catch (e) { if (taken(e)) throw busy(); return unlocked(e); }
-  } finally { try { fs.rmdirSync(gate); } catch {} }
+  throw busyError();
+}
+
+async function lock(app) {
+  // The real path, so the same folder reached through a link or another spelling shares one lock.
+  let dir = path.resolve(app);
+  try { dir = fs.realpathSync.native(dir); } catch {}
+  return process.platform === 'win32' ? lockWindows(dir) : lockSocket(dir);
 }
 
 // ---------------- installing ----------------
@@ -607,4 +627,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { untar, cleanPaths, checkPosse, readArchive, changes, install, recover, rollBack, hooks, lock, request, listening, findRunning, stopRunning, clearTheWay, dataDir, source };
+module.exports = { lockHooks, untar, cleanPaths, checkPosse, readArchive, changes, install, recover, rollBack, hooks, lock, request, listening, findRunning, stopRunning, clearTheWay, dataDir, source };

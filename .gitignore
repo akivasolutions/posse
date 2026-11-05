@@ -6,6 +6,6 @@ Thumbs.db
 tasks/
 .update/
 .posse-version
-.posse-id
 .posse-update.sock
 .posse-update.sock.gate
+.posse-update.lock

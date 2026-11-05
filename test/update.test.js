@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
 const http = require('http');
+const net = require('net');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const U = require('../update');
@@ -564,16 +565,49 @@ test('a tool a bot started is killed with Posse, even after the bot itself exite
 
 const lockScript = (app) => 'require(' + JSON.stringify(path.join(ROOT, 'update.js')) + ').lock(' + JSON.stringify(app) + ').then(() => { console.log("HELD"); setTimeout(() => process.exit(0), 1500); }, (e) => { console.log(e.noStart ? "BUSY" : "ERR " + e.message); process.exit(0); })';
 
-test('the lock lives where only this user can create it, and a lock that cannot be set up lets the update go ahead', { skip: process.platform === 'win32' && 'POSIX socket placement' }, async () => {
+test('the lock lives inside the Posse folder, deep folders get a real lock, and a lock that cannot be set up lets the update go ahead', async () => {
   const app = tmpDir('posse-lockloc-');
-  const unlock = await U.lock(app);
-  assert.ok(fs.readdirSync(app).includes('.posse-update.sock'), 'socket inside the Posse folder');
-  unlock();
-  // A folder too deep for a socket path, and a temp folder that doesn't exist: no lock, but no dead end.
-  const deep = path.join(app, 'x'.repeat(100));
+  const deep = path.join(app, 'x'.repeat(120)); // longer than a socket path may be
   fs.mkdirSync(deep);
-  const r = require('child_process').spawnSync(process.execPath, ['-e', lockScript(deep)], { encoding: 'utf8', env: { ...process.env, TMPDIR: path.join(app, 'no-such-dir') }, timeout: 15000 });
-  assert.match(r.stdout, /going ahead without it[\s\S]*HELD/, r.stdout + r.stderr);
+  const unlock = await U.lock(deep);
+  assert.ok(fs.readdirSync(deep).some((n) => n.startsWith('.posse-update.')), 'lock inside the folder');
+  await assert.rejects(U.lock(deep), /Another update is already running/);
+  unlock();
+  // Something in the way at the lock's name that isn't ours to remove: no lock, but no dead end.
+  const odd = tmpDir('posse-lockodd-');
+  fs.mkdirSync(path.join(odd, process.platform === 'win32' ? '.posse-update.lock' : '.posse-update.sock'));
+  const logs = [];
+  const log = console.log;
+  console.log = (...a) => logs.push(a.join(' '));
+  try { (await U.lock(odd))(); } finally { console.log = log; }
+  assert.match(logs.join('\n'), /going ahead without it/);
+});
+
+test('lock races, made to happen on purpose', { skip: process.platform === 'win32' && 'the socket lock is macOS/Linux' }, async () => {
+  const app = tmpDir('posse-lockdet-');
+  const real = fs.realpathSync(app);
+  const sock = path.join(real, '.posse-update.sock');
+  // 1. A racing bind that reports EEXIST (not EADDRINUSE) still means "taken", not "no lock".
+  const held = await U.lock(app);
+  const realListen = U.lockHooks.listen;
+  U.lockHooks.listen = (srv, addr, cb) => { process.nextTick(() => srv.emit('error', Object.assign(new Error('exists'), { code: 'EEXIST' }))); };
+  try { await assert.rejects(U.lock(app), /Another update is already running/); } finally { U.lockHooks.listen = realListen; }
+  held();
+  // 2. A leftover lock, and another updater takes it over just before we pass the gate: we must
+  //    notice (the second "anyone there?" check), not delete its lock.
+  fs.writeFileSync(sock, 'leftover');
+  const realMkdir = U.lockHooks.mkdir;
+  let other = null;
+  U.lockHooks.mkdir = (p) => {
+    fs.unlinkSync(sock);
+    other = net.createServer((c) => c.destroy()).listen(sock);
+    return realMkdir(p);
+  };
+  try {
+    await new Promise((r) => setTimeout(r, 10));
+    await assert.rejects(U.lock(app), /Another update is already running/);
+    assert.ok(fs.existsSync(sock), "the other updater's lock is still there");
+  } finally { U.lockHooks.mkdir = realMkdir; if (other) other.close(); }
 });
 
 test('several updaters started together over a leftover lock: exactly one gets it', async () => {

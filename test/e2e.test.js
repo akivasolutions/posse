@@ -76,6 +76,10 @@ test('primary bot delegates, specialist reports back, primary follows up', async
   }, 20000, 'chief follow-up turn');
   const cm = await T.msgs(ch);
   assert.ok(cm.some((m) => m.kind === 'card' && m.card.type === 'task' && m.card.taskId === task.id), 'task card in chief chat');
+  // The delegating bot must be told it worked (a false error makes real models retry and duplicate work).
+  const delegTurn = cm.find((m) => m.role === 'bot' && m.kind === 'text' && /delegate_task ->/.test(m.text));
+  assert.match(delegTurn.text, /delegate_task -> Task #\d+ is with @analyst/);
+  assert.ok(!/ERROR/.test(delegTurn.text), 'no error reported to the bot');
   const reportTurn = T.calls().filter((c) => c.argv.includes('--resume')).length;
   assert.ok(reportTurn >= 2);
 });
@@ -477,7 +481,7 @@ test('escalation guard: handing work to a more powerful bot needs approval', asy
   assert.match(card.card.tool, /Hand a task to Ops \(Full access\)/);
   assert.strictEqual(card.card.rule, '', 'no "always allow" for escalations');
   await T.api('POST', '/api/channels/' + ch + '/cards/' + card.id, { decision: 'deny' });
-  await T.waitFor(async () => { const l = lastBot(await T.msgs(ch)); return l && /declined handing this to @ops/.test(l.text); }, 15000, 'declined');
+  await T.waitFor(async () => { const l = lastBot(await T.msgs(ch)); return l && /delegate_task -> ERROR The user declined this/.test(l.text); }, 15000, 'declined');
   assert.ok(!(await T.api('GET', '/api/state')).data.tasks.some((t) => t.title === 'Wipe'));
   // An "always" click on an escalation card is treated as a plain deny-proof one-time decision, never a rule.
   await idle(reader.id);
@@ -621,11 +625,17 @@ test('approvals answered after the bot moved on: card stays open, approval gives
   await T.waitFor(() => T.calls().length > callsBefore, 15000, 'new turn after approval');
   await idle(b.id);
   const next = T.calls().filter((c) => c.settings).pop();
-  assert.ok(next && next.settings.permissions.allow.includes('Bash(npm run deploy)'), 'one-time permission passed to the next turn');
+  assert.ok(next && next.settings.permissions.allow.includes('Bash(npm run deploy)'), 'one-time permission passed to the approval turn');
   assert.ok(history().some((h) => /The user approved your earlier request/.test(h.in)));
   const after = (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === b.id);
-  assert.deepStrictEqual(after.grants, [], 'one-time permission used up');
   assert.deepStrictEqual(after.alwaysAllow, [], 'not made permanent');
+  // Any later turn runs without it.
+  const before2 = T.calls().length;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'something else' });
+  await T.waitFor(() => T.calls().length > before2, 15000, 'later turn');
+  await idle(b.id);
+  const later = T.calls()[T.calls().length - 1];
+  assert.ok(!later.settings || !JSON.stringify(later.settings).includes('npm run deploy'), 'one-time permission not reused');
   assert.strictEqual((await T.msgs(ch)).find((m) => m.id === card.id).card.status, 'allowed');
   assert.ok(!(await T.api('GET', '/api/pending')).data.items.some((i) => i.msg.id === card.id));
   await T.api('DELETE', '/api/bots/' + b.id);
@@ -666,4 +676,12 @@ test('security settings: key rotation, webhook rate limit, audit of settings cha
   assert.strictEqual(old.status, 401, 'old key no longer works');
   T.auth.authorization = 'Bearer ' + fresh.accessKey;
   assert.strictEqual((await T.api('GET', '/api/state')).status, 200);
+});
+
+test('send_message reports success to the sender', async () => {
+  const ch = 'dm:' + chief.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'fyi\n@@call send_message {"to":"analyst","text":"Heads up: Q4 numbers land Monday."}' });
+  const reply = await T.waitFor(async () => (await T.msgs(ch)).reverse().find((m) => m.role === 'bot' && /send_message ->/.test(m.text || '')), 15000, 'reply');
+  assert.match(reply.text, /send_message -> Sent to @analyst\./);
+  await idle(chief.id);
 });

@@ -633,3 +633,50 @@ test('several updaters started together over a leftover lock: exactly one gets i
     assert.strictEqual(held, 1, 'round ' + round + ': ' + outs.map((o) => o.trim()).join(' | '));
   }
 });
+
+test('lock edge cases: read-only lock file (Windows), a lock that cannot be opened, stale and fresh gates, and the working folder is always restored', async () => {
+  const cwd = process.cwd();
+  const sameCwd = (when) => assert.strictEqual(process.cwd(), cwd, 'working folder restored ' + when);
+  const quiet = async (fn) => { const logs = []; const log = console.log; console.log = (...a) => logs.push(a.join(' ')); try { await fn(); } finally { console.log = log; } return logs.join('\n'); };
+  if (process.platform === 'win32') {
+    // A read-only lock file (folder set to read-only with "apply to all files") still locks.
+    const app = tmpDir('posse-lockro-');
+    fs.writeFileSync(path.join(app, '.posse-update.lock'), '');
+    fs.chmodSync(path.join(app, '.posse-update.lock'), 0o444);
+    const held = await U.lock(app);
+    await assert.rejects(U.lock(app), /already running/);
+    held();
+    // An open error other than "in use": no lock, and the update goes ahead.
+    const realOpen = U.lockHooks.open;
+    U.lockHooks.open = () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); };
+    try { assert.match(await quiet(async () => (await U.lock(tmpDir('posse-lockerr-')))()), /going ahead without it/); } finally { U.lockHooks.open = realOpen; }
+    return;
+  }
+  const app = tmpDir('posse-lockgate-');
+  const real = fs.realpathSync(app);
+  const sock = path.join(real, '.posse-update.sock');
+  const gate = sock + '.gate';
+  // A leftover lock and a gate left by a crash a minute ago: taken over, gate cleaned up.
+  fs.writeFileSync(sock, 'leftover');
+  fs.mkdirSync(gate);
+  const old = new Date(Date.now() - 60e3);
+  fs.utimesSync(gate, old, old);
+  const held = await U.lock(app);
+  sameCwd('after taking over');
+  assert.ok(!fs.existsSync(gate), 'stale gate removed');
+  held();
+  sameCwd('after unlocking');
+  // A fresh gate means another updater is taking over right now: busy, and its gate is left alone.
+  fs.writeFileSync(sock, 'leftover');
+  fs.mkdirSync(gate);
+  await assert.rejects(U.lock(app), /already running/);
+  sameCwd('after busy');
+  assert.ok(fs.existsSync(gate), "the other updater's gate is untouched");
+  fs.rmdirSync(gate);
+  fs.rmSync(sock, { force: true });
+  // No lock possible: still the same working folder.
+  const realListen = U.lockHooks.listen;
+  U.lockHooks.listen = (srv) => { process.nextTick(() => srv.emit('error', Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }))); };
+  try { assert.match(await quiet(async () => (await U.lock(app))()), /going ahead without it/); } finally { U.lockHooks.listen = realListen; }
+  sameCwd('after going ahead without a lock');
+});

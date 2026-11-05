@@ -299,7 +299,7 @@ async function clearTheWay(data, argv) {
 // If the lock can't be set up at all (an unusual file system), the update goes ahead without it.
 const LOCK_FILE = process.platform === 'win32' ? '.posse-update.lock' : '.posse-update.sock';
 const UV_FS_O_EXLOCK = 0x10000000; // libuv: open with exclusive sharing (Windows)
-const lockHooks = { listen: (srv, addr, cb) => srv.listen(addr, cb), mkdir: (p) => fs.mkdirSync(p) }; // tests simulate races
+const lockHooks = { listen: (srv, addr, cb) => srv.listen(addr, cb), mkdir: (p) => fs.mkdirSync(p), open: (f, flags) => fs.openSync(f, flags) }; // tests simulate races
 
 function busyError() { return Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true }); }
 function noLock(e) { say('Note: could not set up the update lock (' + (e.code || e.message) + '); going ahead without it.'); return () => {}; }
@@ -308,7 +308,8 @@ async function lockWindows(dir) {
   const f = path.join(dir, LOCK_FILE);
   for (let i = 0; ; i++) {
     try {
-      const fd = fs.openSync(f, fs.constants.O_RDWR | fs.constants.O_CREAT | UV_FS_O_EXLOCK);
+      // Read-only access is enough for exclusive sharing, and works on a read-only file too.
+      const fd = lockHooks.open(f, fs.constants.O_RDONLY | fs.constants.O_CREAT | UV_FS_O_EXLOCK);
       return () => { try { fs.closeSync(fd); } catch {} };
     } catch (e) {
       if (e.code !== 'EBUSY') return noLock(e);

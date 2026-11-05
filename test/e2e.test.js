@@ -269,7 +269,8 @@ test('security: CSRF header, Host check, MCP token', async () => {
   assert.strictEqual(noHeader.status, 403);
   const http = require('http');
   const evil = await new Promise((resolve) => {
-    http.get({ host: '127.0.0.1', port: T.port, path: '/api/state', headers: { host: 'evil.example.com' } }, (res) => resolve(res.statusCode));
+    // No keep-alive: a pooled socket left open would be reset when the server is killed (Windows).
+    http.get({ host: '127.0.0.1', port: T.port, path: '/api/state', headers: { host: 'evil.example.com' }, agent: false }, (res) => { res.resume(); resolve(res.statusCode); }).on('error', () => resolve(0));
   });
   assert.strictEqual(evil, 403);
   const mcp = await fetch(T.base + '/api/mcp/call', { method: 'POST', headers: { 'x-bullpen-run': 'nope', 'content-type': 'application/json' }, body: '{"tool":"team_list"}' });

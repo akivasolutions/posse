@@ -13,6 +13,7 @@ test('a normal shutdown keeps in-flight work queued and does not start new turns
   const ch = 'dm:' + chief.id;
   await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'long\n@@sleep 5000' });
   await T.waitFor(async () => (await T.api('GET', '/api/state')).data.bots[0].status.state === 'working', 10000, 'working');
+  await T.waitFor(() => T.calls().length >= 1, 10000, 'the first turn to start'); // the CLI starts slower on Windows
   await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'queued behind it' });
   const callsBefore = T.calls().length;
   await T.stop();

@@ -180,7 +180,7 @@ test('starting a second copy on the same data opens the running one and touches 
     const other = 40000 + Math.floor(Math.random() * 20000);
     for (const port of [s.port, other]) {
       const out = await new Promise((resolve) => {
-        const c = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--port', String(port), '--data', data], { env: { ...process.env, CLAUDE_BIN: path.join(__dirname, process.platform === 'win32' ? 'fake-claude.cmd' : 'fake-claude.js') }, stdio: ['ignore', 'pipe', 'pipe'] });
+        const c = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--port', String(port), '--data', data], { env: { ...process.env, CLAUDE_BIN: path.join(__dirname, 'fake-claude.js') }, stdio: ['ignore', 'pipe', 'pipe'] });
         let log = '';
         c.stdout.on('data', (d) => { log += d; });
         c.stderr.on('data', (d) => { log += d; });
@@ -215,7 +215,7 @@ test('full update: downloads, stops the running copy, swaps files, keeps data; t
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const url = 'http://127.0.0.1:' + srv.address().port + '/bullpen.tar.gz';
   const data = tmpDir('bullpen-data-');
-  const env = { ...process.env, CLAUDE_BIN: path.join(__dirname, process.platform === 'win32' ? 'fake-claude.cmd' : 'fake-claude.js'), BULLPEN_UPDATE_URL: url, BULLPEN_DATA: data };
+  const env = { ...process.env, CLAUDE_BIN: path.join(__dirname, 'fake-claude.js'), BULLPEN_UPDATE_URL: url, BULLPEN_DATA: data };
   const port = 40000 + Math.floor(Math.random() * 20000);
   const running = spawn(process.execPath, [path.join(app, 'server.js'), '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let rlog = '';

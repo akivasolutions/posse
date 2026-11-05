@@ -199,7 +199,7 @@ async function download(url) {
 function request(port, method, p, body) {
   return new Promise((resolve) => {
     const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
-    const req = http.request({ host: '127.0.0.1', port, method, path: p, timeout: 3000, headers: data ? { 'content-type': 'application/json', 'content-length': data.length } : {} }, (res) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path: p, timeout: 3000, agent: false, headers: data ? { 'content-type': 'application/json', 'content-length': data.length } : {} }, (res) => {
       let s = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { if (s.length < 65536) s += c; });

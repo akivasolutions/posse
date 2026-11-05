@@ -574,7 +574,7 @@ server.on('error', (e) => {
 function provesKey(port) {
   const n = crypto.randomBytes(18).toString('base64url');
   return new Promise((resolve) => {
-    const req = http.get({ host: '127.0.0.1', port, path: '/api/ping?n=' + n, timeout: 2000 }, (res) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/ping?n=' + n, timeout: 2000, agent: false }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { if (body.length < 4096) body += c; });
@@ -631,3 +631,5 @@ async function shutdown() {
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+// Closing the window: Windows allows about 10 seconds to finish, enough to stop bots cleanly.
+process.on('SIGHUP', shutdown);

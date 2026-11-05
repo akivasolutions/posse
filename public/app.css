@@ -337,3 +337,12 @@ textarea.mem { width: 100%; min-height: 140px; border: 1px solid var(--line-stro
 .signin .err { color: var(--bad); }
 .signin input { border: 1px solid var(--line-strong); border-radius: 8px; padding: 9px 11px; background: var(--bg); }
 .signin .btn { justify-content: center; padding: 9px; }
+
+/* small screens: dialogs never grow wider than the viewport */
+.modal { min-width: 0; max-width: 100%; }
+.overlay > * { min-width: 0; }
+.tabs { overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { white-space: nowrap; flex: none; }
+#sec-audit { overflow-wrap: anywhere; }
+.field.inline > span { min-width: 0; overflow-wrap: anywhere; }

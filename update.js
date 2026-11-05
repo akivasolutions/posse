@@ -23,7 +23,7 @@ const MAX_UNPACKED = 200 * 1024 * 1024;
 const MAX_FILES = 5000;
 // Top-level names an update never replaces or removes.
 // Compared without case: Windows and macOS treat ".Git" and ".git" as the same folder.
-const KEEP = new Set(['.git', '.update', '.posse-version', 'data', 'node', 'node_modules']);
+const KEEP = new Set(['.git', '.update', '.posse-version', '.posse-id', '.posse-update.sock', '.posse-update.sock.gate', 'data', 'node', 'node_modules']);
 const kept = (top) => KEEP.has(String(top).toLowerCase());
 // A download must contain these to count as Posse.
 const REQUIRED = ['package.json', 'server.js', 'update.js', 'lib/app.js', 'public/index.html'];
@@ -290,37 +290,64 @@ async function clearTheWay(data, argv) {
   if (Number.isInteger(last.port) && Number.isInteger(last.pid) && last.pid !== process.pid && alive(last.pid) && await connects(last.port, reach(last.host))) throw busy(last.port);
 }
 
-// One update at a time in this folder. The lock is a named pipe (Windows) or a unix socket that
-// only a running updater listens on, so the operating system releases it when that process ends,
-// however it ends: no process numbers, clocks or reboots involved.
+// One update at a time in this folder. An updater holds a local socket that only a running
+// process can answer on, so the operating system frees it when that process ends, however it ends.
+// macOS/Linux: a socket file inside this folder (only its owner can create files there).
+// Windows: a named pipe whose name includes a random id kept in this folder, so another account
+// on the computer can't guess it. If the lock can't be set up at all, the update goes ahead.
+const LOCK_FILE = '.posse-update.sock';
+const ID_FILE = '.posse-id';
+function folderId(app) {
+  const f = path.join(app, ID_FILE);
+  for (let i = 0; i < 20; i++) {
+    try { const id = fs.readFileSync(f, 'utf8').trim(); if (/^[0-9a-f]{32}$/.test(id)) return id; } catch {}
+    try { fs.writeFileSync(f, crypto.randomBytes(16).toString('hex'), { flag: 'wx' }); } catch (e) { if (e.code !== 'EEXIST') return ''; }
+    sleepSync(25); // another updater is writing it right now
+  }
+  return '';
+}
 function lockAddress(app) {
   // The real path, so the same folder reached through a link or another spelling shares one lock.
   let real = path.resolve(app);
   try { real = fs.realpathSync.native(real); } catch {}
-  const id = crypto.createHash('sha256').update(real.toLowerCase()).digest('hex').slice(0, 16);
-  return process.platform === 'win32' ? '\\\\?\\pipe\\posse-update-' + id : path.join(os.tmpdir(), 'posse-update-' + id + '.sock');
+  const hash = (x) => crypto.createHash('sha256').update(x).digest('hex').slice(0, 32);
+  if (process.platform === 'win32') return '\\\\?\\pipe\\posse-update-' + hash(folderId(app) + '|' + real.toLowerCase());
+  const inFolder = path.join(real, LOCK_FILE);
+  // Socket paths are limited to about 104 bytes; a very deep folder uses the temp folder instead.
+  return Buffer.byteLength(inFolder) < 100 ? inFolder : path.join(os.tmpdir(), 'posse-update-' + hash(real) + '.sock');
 }
 async function lock(app) {
   const addr = lockAddress(app);
+  const busy = () => Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true });
+  const unlocked = (e) => { say('Note: could not set up the update lock (' + (e.code || e.message) + '); going ahead without it.'); return () => {}; };
   const hold = () => new Promise((resolve, reject) => {
     const srv = net.createServer((c) => c.destroy());
     srv.once('error', reject);
     srv.listen(addr, () => { srv.unref(); resolve(() => srv.close()); });
   });
-  try { return await hold(); } catch (e) {
-    if (e.code !== 'EADDRINUSE') throw e;
-  }
-  // On macOS and Linux the socket file outlives a process that was killed; nobody answering on it
-  // means it is left over.
-  const answered = await new Promise((resolve) => {
+  const answers = () => new Promise((resolve) => {
     const c = net.connect(addr, () => { c.destroy(); resolve(true); });
     c.on('error', () => resolve(false));
   });
-  if (!answered && process.platform !== 'win32') {
-    try { fs.unlinkSync(addr); } catch {}
-    try { return await hold(); } catch {}
+  try { return await hold(); } catch (e) {
+    if (e.code !== 'EADDRINUSE') return unlocked(e);
   }
-  throw Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true });
+  if (process.platform === 'win32' || await answers()) throw busy();
+  // A socket file left by an updater that was killed. Take it over, one updater at a time: the
+  // "gate" folder is created atomically; a gate older than 10 s was left by a crash.
+  const gate = addr + '.gate';
+  try { fs.mkdirSync(gate); } catch (e) {
+    if (e.code !== 'EEXIST') return unlocked(e);
+    let age = 0;
+    try { age = Date.now() - fs.statSync(gate).mtimeMs; } catch {}
+    if (age < 10e3) throw busy();
+    try { fs.rmdirSync(gate); fs.mkdirSync(gate); } catch { throw busy(); }
+  }
+  try {
+    if (await answers()) throw busy();
+    try { fs.unlinkSync(addr); } catch {}
+    try { return await hold(); } catch (e) { if (e.code === 'EADDRINUSE') throw busy(); return unlocked(e); }
+  } finally { try { fs.rmdirSync(gate); } catch {} }
 }
 
 // ---------------- installing ----------------

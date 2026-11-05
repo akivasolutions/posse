@@ -509,6 +509,12 @@ test('read-only files do not block an update or its recovery', () => {
   U.install(f.app, f.files, f.commit);
   assert.strictEqual(f.r('server.js'), '// new server');
   assert.ok(!fs.existsSync(path.join(f.app, '.update', 'journal.json')), 'finished, not left half done');
+  // A version note that really can't be written (something in the way) doesn't matter either.
+  f = swapFixture();
+  fs.mkdirSync(path.join(f.app, '.posse-version.part'));
+  U.install(f.app, f.files, f.commit);
+  assert.strictEqual(f.r('server.js'), '// new server');
+  assert.ok(!fs.existsSync(path.join(f.app, '.update', 'journal.json')), 'the swap is complete, so no journal');
   // Recovery that finds a read-only leftover from an interrupted copy (copying onto it would fail everywhere).
   f = swapFixture();
   const st = path.join(f.app, '.update');
@@ -554,4 +560,37 @@ test('a tool a bot started is killed with Posse, even after the bot itself exite
     try { process.kill(gpid, 0); } catch { alive = false; }
     assert.strictEqual(alive, false, 'the tool was killed with Posse');
   } finally { try { process.kill(gpid, 'SIGKILL'); } catch {} await s.stop(); }
+});
+
+const lockScript = (app) => 'require(' + JSON.stringify(path.join(ROOT, 'update.js')) + ').lock(' + JSON.stringify(app) + ').then(() => { console.log("HELD"); setTimeout(() => process.exit(0), 1500); }, (e) => { console.log(e.noStart ? "BUSY" : "ERR " + e.message); process.exit(0); })';
+
+test('the lock lives where only this user can create it, and a lock that cannot be set up lets the update go ahead', { skip: process.platform === 'win32' && 'POSIX socket placement' }, async () => {
+  const app = tmpDir('posse-lockloc-');
+  const unlock = await U.lock(app);
+  assert.ok(fs.readdirSync(app).includes('.posse-update.sock'), 'socket inside the Posse folder');
+  unlock();
+  // A folder too deep for a socket path, and a temp folder that doesn't exist: no lock, but no dead end.
+  const deep = path.join(app, 'x'.repeat(100));
+  fs.mkdirSync(deep);
+  const r = require('child_process').spawnSync(process.execPath, ['-e', lockScript(deep)], { encoding: 'utf8', env: { ...process.env, TMPDIR: path.join(app, 'no-such-dir') }, timeout: 15000 });
+  assert.match(r.stdout, /going ahead without it[\s\S]*HELD/, r.stdout + r.stderr);
+});
+
+test('several updaters started together over a leftover lock: exactly one gets it', async () => {
+  const app = tmpDir('posse-lockrace-');
+  // A holder killed outright leaves its lock behind (on macOS/Linux, a socket file).
+  const holder = spawn(process.execPath, ['-e', lockScript(app).replace('setTimeout(() => process.exit(0), 1500)', 'setInterval(() => {}, 1000)')], { stdio: ['ignore', 'pipe', 'inherit'] });
+  await new Promise((r) => holder.stdout.on('data', (d) => { if (/HELD/.test(d)) r(); }));
+  holder.kill('SIGKILL');
+  await new Promise((r) => holder.on('exit', r));
+  for (let round = 0; round < 3; round++) {
+    const outs = await Promise.all(Array.from({ length: 6 }, () => new Promise((resolve) => {
+      const c = spawn(process.execPath, ['-e', lockScript(app)], { stdio: ['ignore', 'pipe', 'inherit'] });
+      let o = '';
+      c.stdout.on('data', (d) => { o += d; });
+      c.on('exit', () => resolve(o));
+    })));
+    const held = outs.filter((o) => /HELD/.test(o)).length;
+    assert.strictEqual(held, 1, 'round ' + round + ': ' + outs.map((o) => o.trim()).join(' | '));
+  }
 });

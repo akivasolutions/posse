@@ -563,7 +563,9 @@ test('a tool a bot started is killed with Posse, even after the bot itself exite
   } finally { try { process.kill(gpid, 'SIGKILL'); } catch {} await s.stop(); }
 });
 
-const lockScript = (app) => 'require(' + JSON.stringify(path.join(ROOT, 'update.js')) + ').lock(' + JSON.stringify(app) + ').then(() => { console.log("HELD"); setTimeout(() => process.exit(0), 1500); }, (e) => { console.log(e.noStart ? "BUSY" : "ERR " + e.message); process.exit(0); })';
+// Holders keep the lock longer than a busy updater keeps retrying (1.5 s on Windows), so any
+// second "HELD" in a round means two at once.
+const lockScript = (app) => 'require(' + JSON.stringify(path.join(ROOT, 'update.js')) + ').lock(' + JSON.stringify(app) + ').then(() => { console.log("HELD"); setTimeout(() => process.exit(0), 3000); }, (e) => { console.log(e.noStart ? "BUSY" : "ERR " + e.message); process.exit(0); })';
 
 test('the lock lives inside the Posse folder, deep folders get a real lock, and a lock that cannot be set up lets the update go ahead', async () => {
   const app = tmpDir('posse-lockloc-');
@@ -573,14 +575,17 @@ test('the lock lives inside the Posse folder, deep folders get a real lock, and 
   assert.ok(fs.readdirSync(deep).some((n) => n.startsWith('.posse-update.')), 'lock inside the folder');
   await assert.rejects(U.lock(deep), /Another update is already running/);
   unlock();
-  // Something in the way at the lock's name that isn't ours to remove: no lock, but no dead end.
+  // Something in the way at the lock's name that isn't ours to remove: never a dead end.
   const odd = tmpDir('posse-lockodd-');
   fs.mkdirSync(path.join(odd, process.platform === 'win32' ? '.posse-update.lock' : '.posse-update.sock'));
   const logs = [];
   const log = console.log;
   console.log = (...a) => logs.push(a.join(' '));
-  try { (await U.lock(odd))(); } finally { console.log = log; }
-  assert.match(logs.join('\n'), /going ahead without it/);
+  let first;
+  try { first = await U.lock(odd); } finally { console.log = log; }
+  if (process.platform === 'win32') await assert.rejects(U.lock(odd), /already running/); // Windows locks the folder itself just as well
+  else assert.match(logs.join('\n'), /going ahead without it/); // a socket can't be made there: go ahead unlocked
+  first();
 });
 
 test('lock races, made to happen on purpose', { skip: process.platform === 'win32' && 'the socket lock is macOS/Linux' }, async () => {
@@ -613,7 +618,7 @@ test('lock races, made to happen on purpose', { skip: process.platform === 'win3
 test('several updaters started together over a leftover lock: exactly one gets it', async () => {
   const app = tmpDir('posse-lockrace-');
   // A holder killed outright leaves its lock behind (on macOS/Linux, a socket file).
-  const holder = spawn(process.execPath, ['-e', lockScript(app).replace('setTimeout(() => process.exit(0), 1500)', 'setInterval(() => {}, 1000)')], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const holder = spawn(process.execPath, ['-e', lockScript(app).replace('setTimeout(() => process.exit(0), 3000)', 'setInterval(() => {}, 1000)')], { stdio: ['ignore', 'pipe', 'inherit'] });
   await new Promise((r) => holder.stdout.on('data', (d) => { if (/HELD/.test(d)) r(); }));
   holder.kill('SIGKILL');
   await new Promise((r) => holder.on('exit', r));

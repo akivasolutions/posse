@@ -50,6 +50,8 @@ test('a direct message gets a reply and the session persists', async () => {
   assert.strictEqual(last[last.indexOf('--setting-sources') + 1], '', 'no settings files: neither the user\'s nor the folder\'s');
   const allowed = last[last.indexOf('--allowedTools') + 1].split(',');
   for (const t of ['Read', 'Grep', 'Glob', 'WebFetch']) assert.ok(!allowed.includes(t), t + ' is not pre-approved');
+  const lastCall = T.calls()[T.calls().length - 1];
+  assert.ok(lastCall.settings && lastCall.settings.permissions.deny.includes('Edit(//**/.claude/**)'), 'bots can never write Claude Code settings');
   assert.strictEqual(last[last.indexOf('--permission-mode') + 1], 'default');
   assert.strictEqual(last[last.indexOf('--permission-prompt-tool') + 1], 'mcp__bullpen__approval_prompt');
 });

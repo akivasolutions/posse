@@ -497,7 +497,7 @@
       case 'approval': {
         const raw = Object.entries(c.input || {}).map(([k, v]) => k + ': ' + v).join('\n');
         // Make direction overrides and zero-width characters visible, so text can't be disguised.
-        const input = raw.replace(/[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{E0000}-\u{E007F}]/gu,
+        const input = raw.replace(/(?!\uFE0F)[\p{Default_Ignorable_Code_Point}\u061c\u202a-\u202e\u2066-\u2069]/gu,
           (ch) => '⟦U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0') + '⟧');
         const lines = raw.split('\n').length;
         const sizeNote = c.fullSize ? c.fullSize.toLocaleString() + ' characters in all · <b>only the first part is shown</b>' : raw.length.toLocaleString() + ' characters';
@@ -1439,6 +1439,8 @@
     V.msgs = {};
     connect();
     await refreshState();
+    V.linksStale = false;
+    clearTimeout(V.relinkTimer);
     if (V.pane && V.pane.startsWith('page:')) { delete $('#pane').dataset.page; }
     renderMain();
     renderPane();
@@ -1468,8 +1470,13 @@
     setInterval(() => {
       api('GET', '/api/whoami').then((r) => {
         if (r.vt === VT) return;
-        if (V.linksStale) { VT = r.vt; relink(); return; } // second rollover without a refresh: links are about to expire
+        if (V.linksStale) { VT = r.vt; return relink(); }
         VT = r.vt; connect(); V.linksStale = true;
+        // Links signed yesterday stop working at the next UTC midnight; refresh a few minutes before.
+        const now = new Date();
+        const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+        clearTimeout(V.relinkTimer);
+        V.relinkTimer = setTimeout(() => { if (V.linksStale) relink().catch(() => {}); }, Math.max(60e3, midnight - Date.now() - 5 * 60e3));
       }).catch(() => {});
     }, 3600e3);
     go(fromHash(), { replace: true });

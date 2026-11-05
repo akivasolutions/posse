@@ -110,15 +110,19 @@ test('folder routines catch up on files added while the folder was unwatched', a
   const r = { id: 'rt_1', botId: 'b', enabled: true, pendingApproval: false, schedule: { type: 'folder', path: dir } };
   const app = { routines: new Map([[r.id, r]]), runner: { running: new Map() }, bots: new Map(), fireRoutine: (rr, payload) => fired.push(payload), expireDeferred() {} };
   const s = new Scheduler(app);
+  const until = async (cond) => { for (let i = 0; i < 100 && !cond(); i++) await new Promise((res) => setTimeout(res, 20)); };
   fs.rmSync(dir, { recursive: true });
-  s.syncWatchers(); // folder missing: not watched, remembered as missing
+  s.syncWatchers(); // folder missing (checked without blocking): not watched, remembered as missing
+  await until(() => r.watchError);
   assert.strictEqual(s.watchers.size, 0);
   assert.strictEqual(r.watchError, 'The folder is missing');
   fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, 'arrived-while-missing.csv'), '1');
   s.syncWatchers(); // folder back: watched again, and the new file is queued
+  await until(() => s.watchers.size === 1);
   assert.strictEqual(s.watchers.size, 1);
   await new Promise((res) => setTimeout(res, Number(process.env.BULLPEN_FOLDER_QUIET_MS || 20000) + 300));
   s.stop();
+  fs.rmSync(dir, { recursive: true, force: true });
   assert.ok(fired.some((p) => /arrived-while-missing\.csv/.test(p)));
 });

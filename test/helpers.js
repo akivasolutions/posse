@@ -40,7 +40,7 @@ async function startServer(opts = {}) {
   };
   const calls = () => { try { return fs.readFileSync(path.join(tmp, 'fake', 'calls.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((c) => c.argv.includes('-p')); } catch { return []; } };
   const stop = () => new Promise((resolve) => { child.on('exit', resolve); child.kill('SIGTERM'); setTimeout(resolve, 1500); });
-  return { base, api, msgs, waitFor, calls, stop, tmp, port, auth, secret, log: () => log };
+  return { base, api, msgs, waitFor, calls, stop, tmp, port, auth, secret, pid: child.pid, child, log: () => log };
 }
 
 module.exports = { startServer };

@@ -198,13 +198,13 @@ async function download(url) {
 // ---------------- the running Posse ----------------
 
 // Always settles within 3 seconds, even if whatever is on the port sends headers and then stalls.
-function request(port, method, p, body) {
+function request(port, method, p, body, host = '127.0.0.1') {
   return new Promise((resolve) => {
     const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
     const fail = { status: 0, json: null };
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
-    const req = http.request({ host: '127.0.0.1', port, method, path: p, agent: false, headers: data ? { 'content-type': 'application/json', 'content-length': data.length } : {} }, (res) => {
+    const req = http.request({ host, port, method, path: p, agent: false, headers: data ? { 'content-type': 'application/json', 'content-length': data.length } : {} }, (res) => {
       let s = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { if (s.length < 65536) s += c; });
@@ -218,24 +218,35 @@ function request(port, method, p, body) {
   });
 }
 
-function listening(port) {
+function connects(port, host) {
   return new Promise((resolve) => {
-    const s = net.connect({ host: '127.0.0.1', port }, () => { s.destroy(); resolve(true); });
+    const s = net.connect({ host, port }, () => { s.destroy(); resolve(true); });
     s.on('error', () => resolve(false));
     s.setTimeout(1500, () => { s.destroy(); resolve(false); });
   });
 }
+// Anything listening on this port on either loopback address (Posse may be on ::1 via "localhost").
+const listening = async (port) => (await connects(port, '127.0.0.1')) || (await connects(port, '::1'));
+const LOOPBACK = ['127.0.0.1', 'localhost', '::1'];
 
 // The Posse using this data folder, if one is running. It must prove it knows the access key,
 // and the key itself is never sent, so whatever else might be on the port learns nothing.
 async function findRunning(data, argv) {
   const key = (readJSON(path.join(data, 'secret.json')) || {}).accessKey;
   if (!key) return null;
-  const ports = [(readJSON(path.join(data, 'server.json')) || {}).port, parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10), 4747];
-  for (const port of [...new Set(ports.filter((p) => Number.isInteger(p) && p > 0 && p < 65536))]) {
+  const last = readJSON(path.join(data, 'server.json')) || {};
+  const host = (h) => (LOOPBACK.includes(h) ? h : '127.0.0.1');
+  const tries = [];
+  const add = (port, h) => { if (Number.isInteger(port) && port > 0 && port < 65536 && !tries.some((t) => t.port === port && t.host === h)) tries.push({ port, host: h }); };
+  add(last.port, host(last.host));
+  add(parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747, host(argVal(argv, 'host', 'POSSE_HOST')));
+  add(4747, '127.0.0.1');
+  for (const t of tries) {
     const n = crypto.randomBytes(18).toString('base64url');
-    const r = await request(port, 'GET', '/api/ping?n=' + n);
-    if (r.status === 200 && r.json && typeof r.json.proof === 'string' && r.json.proof === hmac(key, 'ping:' + n)) return { port, key };
+    const r = await request(t.port, 'GET', '/api/ping?n=' + n, undefined, t.host);
+    if (!r.json || typeof r.json.proof !== 'string' || r.json.proof !== hmac(key, 'ping:' + n)) continue;
+    if (r.status === 200) return { ...t, key };
+    if (r.status === 503 && r.json.closing) return { ...t, key, closing: true }; // already shutting down
   }
   return null;
 }
@@ -247,9 +258,11 @@ async function stopRunning(data, argv) {
   if (!run) return false;
   const pid = (readJSON(path.join(data, 'server.json')) || {}).pid;
   say('Stopping the running Posse (bots that were working pick up again after the restart)…');
-  const t = Date.now();
-  const r = await request(run.port, 'POST', '/api/stop', { t, sig: hmac(run.key, 'stop:' + t), reason: 'update' });
-  if (r.status !== 200) throw new Error('Posse did not stop (HTTP ' + r.status + '). Close its window, then run the update again.');
+  if (!run.closing) {
+    const t = Date.now();
+    const r = await request(run.port, 'POST', '/api/stop', { t, sig: hmac(run.key, 'stop:' + t), reason: 'update' }, run.host);
+    if (r.status !== 200) throw new Error('Posse did not stop (HTTP ' + r.status + '). Close its window, then run the update again.');
+  }
   for (let i = 0; i < 150; i++) {
     if (!(await listening(run.port)) && !(Number.isInteger(pid) && pid !== process.pid && alive(pid))) return true;
     await sleep(200);
@@ -261,8 +274,12 @@ async function stopRunning(data, argv) {
 // port Posse will start on (an older Posse, or one using another data folder).
 async function clearTheWay(data, argv) {
   if (await stopRunning(data, argv)) return;
-  const port = parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747;
-  if (await listening(port)) throw new Error('Something else is using port ' + port + '. If it is Posse, close its window, then run the update again. Nothing was changed.');
+  const ports = new Set([parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747]);
+  const last = readJSON(path.join(data, 'server.json')) || {};
+  if (Number.isInteger(last.port) && Number.isInteger(last.pid) && last.pid !== process.pid && alive(last.pid)) ports.add(last.port);
+  for (const port of ports) {
+    if (await listening(port)) throw new Error('Something else is using port ' + port + '. If it is Posse, close its window, then run the update again. Nothing was changed.');
+  }
 }
 
 // One update at a time in this folder. A lock left by an update that was closed is taken over.
@@ -275,7 +292,7 @@ function lock(app) {
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const pid = parseInt(fs.readFileSync(f, 'utf8'), 10);
-      if (pid && pid !== process.pid && alive(pid)) throw new Error('Another update is already running in this folder. Wait for it to finish.');
+      if (pid && pid !== process.pid && alive(pid)) throw Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true });
       fs.rmSync(f, { force: true });
     }
   }
@@ -314,6 +331,10 @@ const hooks = { rename: renameRetry }; // tests replace this to simulate a locke
 const stageDir = (app) => path.join(app, '.update');
 const journalFile = (app) => path.join(app, '.update', 'journal.json');
 
+const isFile = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+// The name as it is on disk (macOS and Windows match names regardless of case).
+const onDisk = (dir, name) => { try { return fs.readdirSync(dir).find((n) => n.toLowerCase() === name.toLowerCase()); } catch { return undefined; } };
+
 function swapAll(app, plan) {
   const NEW = path.join(stageDir(app), 'new');
   const PREV = path.join(stageDir(app), 'previous');
@@ -321,7 +342,20 @@ function swapAll(app, plan) {
     const staged = path.join(NEW, t);
     if (!fs.existsSync(staged)) continue; // already placed
     const cur = path.join(app, t);
-    if (fs.existsSync(cur)) hooks.rename(cur, path.join(PREV, t));
+    const back = path.join(PREV, t);
+    if (isFile(staged) && isFile(cur) && onDisk(app, t) === t) {
+      // Files (server.js, update.js, the launchers…) are replaced in one step, so they are never
+      // missing, even if the window closes mid-update. The old one is copied to previous first.
+      // (A file renamed only in case takes the two-step path below, or it would keep the old case.)
+      if (!fs.existsSync(back)) { fs.copyFileSync(cur, back + '.part'); hooks.rename(back + '.part', back); }
+      hooks.rename(staged, cur);
+      continue;
+    }
+    if (fs.existsSync(cur)) {
+      // A backup from an earlier attempt (the old files were put back by hand meanwhile).
+      if (fs.existsSync(back)) fs.rmSync(back, { recursive: true, force: true });
+      hooks.rename(cur, back);
+    }
     hooks.rename(staged, cur);
   }
   for (const t of plan.gone) {
@@ -339,8 +373,18 @@ function rollBack(app, plan) {
   }
   for (const t of [...plan.tops].reverse()) {
     const cur = path.join(app, t);
-    if (!fs.existsSync(path.join(NEW, t)) && fs.existsSync(cur)) hooks.rename(cur, path.join(NEW, t));
-    if (!fs.existsSync(cur) && fs.existsSync(path.join(PREV, t))) hooks.rename(path.join(PREV, t), cur);
+    const staged = path.join(NEW, t);
+    const back = path.join(PREV, t);
+    if (!fs.existsSync(staged) && fs.existsSync(cur)) {
+      if (isFile(cur) && isFile(back)) {
+        // A replaced file: keep the new one staged and put the old one back in one step.
+        fs.copyFileSync(cur, staged + '.part'); hooks.rename(staged + '.part', staged);
+        fs.copyFileSync(back, back + '.part'); hooks.rename(back + '.part', cur);
+        continue;
+      }
+      hooks.rename(cur, staged);
+    }
+    if (!fs.existsSync(cur) && fs.existsSync(back)) hooks.rename(back, cur);
   }
 }
 
@@ -352,17 +396,32 @@ function finishSwap(app, plan) {
 
 const which = (e) => (e.path ? path.basename(e.path) : 'a file') + ' (' + (e.code || e.message) + ')';
 
-// An update that was interrupted (window closed, power cut, a file locked) is finished here.
-function recover(app) {
+// The journal is written (and flushed to disk) before the first rename, so one that can't be read
+// means the update stopped before changing anything.
+function writeJournal(app, plan) {
+  const fd = fs.openSync(journalFile(app), 'w');
+  try { fs.writeSync(fd, JSON.stringify(plan)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+function readJournal(app) {
+  if (!fs.existsSync(journalFile(app))) return null;
   const plan = readJSON(journalFile(app));
+  const ok = plan && Array.isArray(plan.tops) && Array.isArray(plan.gone) &&
+    ![...plan.tops, ...plan.gone].some((t) => typeof t !== 'string' || !t || t.includes('/') || t.includes('\\') || t === '.' || t === '..' || kept(t));
+  return ok ? plan : 'bad';
+}
+function clearBadJournal(app) {
+  fs.rmSync(journalFile(app), { force: true });
+  fs.rmSync(path.join(stageDir(app), 'new'), { recursive: true, force: true });
+  say('Cleared an update that was cut off before it changed anything.');
+}
+
+// An update that was interrupted (window closed, power cut, a file locked) is finished here.
+function recover(app, plan = readJournal(app)) {
+  if (plan === 'bad') { clearBadJournal(app); return false; }
   if (!plan) return false;
-  if (!Array.isArray(plan.tops) || !Array.isArray(plan.gone) || [...plan.tops, ...plan.gone].some((t) => typeof t !== 'string' || !t || t.includes('/') || t.includes('\\') || t === '.' || t === '..' || kept(t))) {
-    fs.rmSync(journalFile(app), { force: true });
-    return false;
-  }
   say('Finishing an update that was interrupted…');
   try { swapAll(app, plan); } catch (e) {
-    throw new Error('Could not finish the interrupted update: ' + which(e) + '. Close any program using the Posse folder, then run the update again.');
+    throw new Error('Could not finish the interrupted update: ' + which(e) + '. Close any program using the Posse folder (or restart the computer), then run the update again.');
   }
   finishSwap(app, plan);
   say('Done.');
@@ -387,7 +446,7 @@ function install(app, files, commit) {
   }
   const { tops, gone } = changes(app, files);
   const plan = { tops: [...tops.filter((t) => t !== 'update.js'), ...tops.filter((t) => t === 'update.js')], gone, commit: commit || '' };
-  fs.writeFileSync(journalFile(app), JSON.stringify(plan));
+  writeJournal(app, plan);
   try { swapAll(app, plan); } catch (e) {
     try { rollBack(app, plan); } catch (e2) {
       throw new Error('Could not replace ' + which(e) + ', and could not put the old files back: ' + which(e2) + '. Close any program using the Posse folder, then run the update again; it finishes the update.');
@@ -437,9 +496,14 @@ async function main(argv) {
 }
 
 async function run(app, data, argv) {
-  if (fs.existsSync(journalFile(app))) {
+  const pending = readJournal(app);
+  if (pending === 'bad') clearBadJournal(app);
+  else if (pending && argv.includes('--check')) {
+    say('An update was interrupted. Double-click start (or run the update) to finish it.');
+    return false;
+  } else if (pending) {
     await clearTheWay(data, argv);
-    recover(app);
+    recover(app, pending);
   }
   if (argv.includes('--finish')) return !argv.includes('--no-start'); // start.cmd after an interrupted update
   if (isGitCheckout(app)) {
@@ -470,7 +534,8 @@ if (require.main === module) {
   }, (e) => {
     console.error('\n  Update failed: ' + e.message + '\n');
     if (process.argv.includes('--check') || process.argv.includes('--no-start')) process.exit(1);
-    if (fs.existsSync(journalFile(__dirname)) || !fs.existsSync(path.join(__dirname, 'server.js'))) process.exit(1); // half-updated: don't start
+    // Another update is running, or this one is half done: don't start anything.
+    if (e.noStart || fs.existsSync(journalFile(__dirname)) || !fs.existsSync(path.join(__dirname, 'server.js'))) process.exit(1);
     console.error('  Starting the version you already have.\n');
     require(path.join(__dirname, 'server.js'));
   });

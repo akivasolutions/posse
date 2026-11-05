@@ -12,6 +12,7 @@
 //   @@as <handle> <directive>  run the directive only when this bot's handle matches
 //   @@ctx <tokens>           report this context size in usage
 //   @@reply <text>           final reply text (default: "ok: <first line of input>"); {AT} becomes @
+//   @@ignore-term            keep running when asked to stop (SIGTERM), like a stuck CLI
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -32,7 +33,7 @@ let priority = null;
 try { priority = require('os').getPriority(process.pid); } catch {}
 let flagSettings = null;
 try { if (opt('--settings')) flagSettings = JSON.parse(fs.readFileSync(opt('--settings'), 'utf8')); } catch {}
-fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ argv, cwd: process.cwd(), settings: flagSettings, priority, autoMemoryOff: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === '1' }) + '\n');
+fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ pid: process.pid, argv, cwd: process.cwd(), settings: flagSettings, priority, autoMemoryOff: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === '1' }) + '\n');
 
 const out = (ev) => process.stdout.write(JSON.stringify(ev) + '\n');
 
@@ -122,6 +123,8 @@ async function main() {
       const f = path.resolve(process.cwd(), m[1].trim());
       out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'w' + Date.now(), name: 'Write', input: { file_path: f, content: 'written by the bot' } }] } });
       fs.writeFileSync(f, 'written by the bot');
+    } else if (/^@@ignore-term\b/.test(line)) {
+      process.on('SIGTERM', () => {});
     } else if ((m = /^@@sleep\s+(\d+)/.exec(line))) {
       await new Promise((res) => setTimeout(res, +m[1]));
     } else if ((m = /^@@fail\s*(.*)$/.exec(line))) {

@@ -320,6 +320,8 @@ route('GET', '/api/whoami', () => ({ ok: true, vt: viewToken() }));
 route('GET', '/api/ping', (req, res, p, url) => {
   const n = String(url.searchParams.get('n') || '');
   if (!/^[\w-]{16,64}$/.test(n)) throw httpError(400, 'Bad challenge');
+  // While shutting down, say so: a new copy waits for this one instead of "opening" it.
+  if (closing) { send(res, 503, { posse: true, closing: true, proof: proof('ping:' + n) }); return undefined; }
   return { posse: true, proof: proof('ping:' + n) };
 }, { open: true });
 // The update script stops Posse with a signed request that is good for one minute, once.
@@ -572,34 +574,54 @@ server.on('error', (e) => {
 
 // One Posse per data folder. If this folder's Posse is already running (on any port), open
 // that one instead of starting a second copy, which would fight over the same files.
-function provesKey(port) {
+// 'yes' (this folder's Posse), 'closing' (it, shutting down) or 'no'.
+function provesKey(port, host) {
   const n = crypto.randomBytes(18).toString('base64url');
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
-    const req = http.get({ host: '127.0.0.1', port, path: '/api/ping?n=' + n, agent: false }, (res) => {
+    const req = http.get({ host, port, path: '/api/ping?n=' + n, agent: false }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { if (body.length < 4096) body += c; });
-      res.on('end', () => { try { done(same(JSON.parse(body).proof, proof('ping:' + n))); } catch { done(false); } });
-      res.on('error', () => done(false));
-      res.on('close', () => done(false));
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(body);
+          if (!same(j.proof, proof('ping:' + n))) return done('no');
+          done(res.statusCode === 503 && j.closing ? 'closing' : res.statusCode === 200 ? 'yes' : 'no');
+        } catch { done('no'); }
+      });
+      res.on('error', () => done('no'));
+      res.on('close', () => done('no'));
     });
     // Settles even if whatever is on the port sends headers and then stalls.
-    const timer = setTimeout(() => { req.destroy(); done(false); }, 2000);
-    req.on('error', () => done(false));
+    const timer = setTimeout(() => { req.destroy(); done('no'); }, 2000);
+    req.on('error', () => done('no'));
   });
 }
+const loopbackHost = (h) => (['127.0.0.1', 'localhost', '::1'].includes(h) ? h : '127.0.0.1');
 async function alreadyRunning() {
-  const last = (app.store.readJSON('server.json', null) || {}).port;
-  for (const port of [...new Set([last, PORT])]) if (Number.isInteger(port) && port > 0 && port < 65536 && await provesKey(port)) return port;
-  return 0;
+  const last = app.store.readJSON('server.json', null) || {};
+  for (const [port, host] of [[last.port, loopbackHost(last.host)], [PORT, loopbackHost(HOST)]]) {
+    if (!(Number.isInteger(port) && port > 0 && port < 65536)) continue;
+    let r = await provesKey(port, host);
+    // A copy that is shutting down (a restart, an update): wait for it to finish, then start.
+    for (let i = 0; r === 'closing' && i < 60; i++) { await new Promise((ok) => setTimeout(ok, 250)); r = await provesKey(port, host); }
+    if (r === 'yes') return { port, host };
+  }
+  return null;
 }
 
 (async () => {
+  // A half-finished update: the files here are a mix of two versions. start.cmd / start.command
+  // finish it automatically; when started directly, say how.
+  if (fs.existsSync(path.join(__dirname, '.update', 'journal.json'))) {
+    console.error('\n  An update of Posse was interrupted. Finish it with: node update.js --finish --open\n  (or double-click start.cmd / start.command).\n');
+    process.exit(1);
+  }
   const running = await alreadyRunning();
   if (running) {
-    const u = 'http://127.0.0.1:' + running + '/#key=' + encodeURIComponent(secret.accessKey);
+    const u = 'http://' + (running.host === '::1' ? '[::1]' : running.host) + ':' + running.port + '/#key=' + encodeURIComponent(secret.accessKey);
     console.log('\n  Posse is already running' + (process.argv.includes('--open') ? '; opened it in your browser' : '') + ':\n  ' + u + '\n');
     if (process.argv.includes('--open')) openBrowser(u);
     return;
@@ -610,7 +632,7 @@ async function alreadyRunning() {
 
 function onListening() {
   app.load();
-  app.store.writeJSON('server.json', { pid: process.pid, port: PORT, startedAt: Date.now() });
+  app.store.writeJSON('server.json', { pid: process.pid, port: PORT, host: HOST, startedAt: Date.now() });
   const info = app.publicState().cli;
   console.log('\n  Posse ' + pkg.version + (BUILD ? ' (' + BUILD.slice(0, 7) + ')' : '') + ' — open this link to sign in:\n  ' + openUrl());
   console.log('  Data:   ' + DATA);

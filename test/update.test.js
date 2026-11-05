@@ -265,11 +265,38 @@ test('full update: downloads, stops the running copy, swaps files, keeps data; t
     U.hooks.rename = (a, b) => { if (++n > 3) throw Object.assign(new Error('killed'), { code: 'EINTR' }); return realRename(a, b); };
     try { assert.throws(() => U.install(app, next.files, next.commit), /run the update again/); } finally { U.hooks.rename = realRename; }
     assert.ok(fs.existsSync(path.join(app, '.update', 'journal.json')));
+    const chk2 = await run(['--check']);
+    assert.match(chk2.log, /An update was interrupted/, 'only reported');
+    assert.ok(fs.existsSync(path.join(app, '.update', 'journal.json')));
+    const direct = await new Promise((resolve) => {
+      const c = spawn(process.execPath, [path.join(app, 'server.js'), '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let log = '';
+      c.stdout.on('data', (d) => { log += d; });
+      c.stderr.on('data', (d) => { log += d; });
+      c.on('exit', (code) => resolve({ code, log }));
+    });
+    assert.strictEqual(direct.code, 1);
+    assert.match(direct.log, /update of Posse was interrupted.*--finish/s, 'server.js will not start a half-updated folder');
     const fin = await run(['--finish', '--no-start']);
     assert.strictEqual(fin.code, 0, fin.log);
     assert.match(fin.log, /Finishing an update that was interrupted/);
     assert.strictEqual(JSON.parse(fs.readFileSync(path.join(app, 'package.json'), 'utf8')).version, '9.9.10');
     assert.strictEqual(fs.readFileSync(path.join(app, 'NEWFILE.md'), 'utf8'), 'v10');
+    assert.ok(!fs.existsSync(path.join(app, '.update', 'journal.json')));
+    // Another update holding the lock: this one starts nothing at all.
+    fs.writeFileSync(path.join(app, '.update.lock'), String(process.pid));
+    const locked = await run([]);
+    fs.rmSync(path.join(app, '.update.lock'), { force: true });
+    assert.strictEqual(locked.code, 1, locked.log);
+    assert.match(locked.log, /Another update is already running/);
+    assert.doesNotMatch(locked.log, /Starting the version|open this link/);
+    // A journal that can't be read (cut off while being written) is cleared without stopping anything.
+    fs.mkdirSync(path.join(app, '.update'), { recursive: true });
+    fs.writeFileSync(path.join(app, '.update', 'journal.json'), '');
+    const bad = await run(['--finish', '--no-start']);
+    assert.strictEqual(bad.code, 0, bad.log);
+    assert.match(bad.log, /Cleared an update that was cut off before it changed anything/);
+    assert.doesNotMatch(bad.log, /Stopping/);
     assert.ok(!fs.existsSync(path.join(app, '.update', 'journal.json')));
   } finally {
     running.kill();
@@ -323,9 +350,9 @@ test('a locked file: the update is undone and says so; if undoing fails too, the
   f = swapFixture();
   let failing = true;
   const inNew = (x) => x.includes(path.sep + '.update' + path.sep + 'new');
-  // Placing public fails; then putting the already-placed server.js back fails too.
+  // Placing public fails; then putting the old server.js back fails too.
   U.hooks.rename = (a, b) => {
-    if (failing && ((path.basename(a) === 'public' && inNew(a)) || (path.basename(a) === 'server.js' && inNew(b)))) throw Object.assign(new Error('busy'), { code: 'EBUSY', path: a });
+    if (failing && ((path.basename(a) === 'public' && inNew(a)) || (b === path.join(f.app, 'server.js') && a.includes(path.sep + 'previous' + path.sep)))) throw Object.assign(new Error('busy'), { code: 'EBUSY', path: b });
     return realRename(a, b);
   };
   try {
@@ -352,7 +379,8 @@ test('an update cut off mid-swap (window closed) is finished on the next run', a
   try { assert.throws(() => U.install(f.app, f.files, f.commit)); } catch {} finally { U.hooks.rename = realRename; }
   // install's own undo also hit the "kill", so the journal is left for the next start to finish.
   assert.ok(fs.existsSync(path.join(f.app, '.update', 'journal.json')));
-  assert.ok(!fs.existsSync(path.join(f.app, 'server.js')), 'half done: server.js is only in .update');
+  // Top-level files are replaced in one step, so they are never missing, even half way.
+  for (const file of ['server.js', 'update.js', 'package.json']) assert.ok(fs.existsSync(path.join(f.app, file)), file + ' present');
   assert.strictEqual(U.recover(f.app), true);
   for (const [rel, want] of [['server.js', '// new server'], ['lib/app.js', '// new app'], ['update.js', '// new updater'], ['public/index.html', '<!doctype html>']]) assert.strictEqual(f.r(rel), want, rel);
 });
@@ -397,4 +425,67 @@ test('one update at a time; a lock left by a closed update is taken over', () =>
   again();
   assert.ok(!fs.existsSync(path.join(app, '.update.lock')));
   unlock();
+});
+
+test('recovery still works after the old files were put back by hand', () => {
+  const f = swapFixture();
+  let n = 0;
+  // Stop right after lib was moved aside (before the new lib was placed); the undo fails as well.
+  U.hooks.rename = (a, b) => { if (++n > 5) throw Object.assign(new Error('killed'), { code: 'EINTR' }); return realRename(a, b); };
+  try { assert.throws(() => U.install(f.app, f.files, f.commit)); } finally { U.hooks.rename = realRename; }
+  assert.ok(!fs.existsSync(path.join(f.app, 'lib')) && fs.existsSync(path.join(f.app, '.update', 'previous', 'lib')), 'lib moved aside');
+  fs.cpSync(path.join(f.app, '.update', 'previous', 'lib'), path.join(f.app, 'lib'), { recursive: true }); // the user restored it
+  assert.strictEqual(U.recover(f.app), true);
+  assert.strictEqual(f.r('lib/app.js'), '// new app');
+  assert.strictEqual(f.r('server.js'), '// new server');
+  assert.ok(!fs.existsSync(path.join(f.app, '.update', 'journal.json')));
+});
+
+test('a Posse bound to "localhost" is found and stopped through server.json', async () => {
+  const data = tmpDir('posse-lh-');
+  const port = 40000 + Math.floor(Math.random() * 20000);
+  const c = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--host', 'localhost', '--port', String(port), '--data', data], { env: { ...process.env, CLAUDE_BIN: path.join(__dirname, 'fake-claude.js') }, stdio: 'ignore' });
+  const exited = new Promise((r) => c.on('exit', r));
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(path.join(data, 'server.json')); i++) await new Promise((r) => setTimeout(r, 100));
+    const found = await U.findRunning(data, []);
+    assert.ok(found && found.port === port && found.host === 'localhost', JSON.stringify(found));
+    assert.strictEqual(await U.stopRunning(data, []), true);
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 500))]);
+    assert.ok(c.exitCode !== null || c.signalCode !== null);
+  } finally { c.kill(); }
+});
+
+test('a restart during shutdown waits for the old copy, and no bot outlives it', { skip: process.platform === 'win32' && 'needs a graceful signal' }, async () => {
+  const s = await startServer();
+  try {
+    const chief = (await s.api('GET', '/api/state')).data.bots.find((b) => b.primary);
+    await s.api('POST', '/api/channels/dm:' + chief.id + '/messages', { text: 'stuck\n@@ignore-term\n@@sleep 30000' });
+    await s.waitFor(() => s.calls().length >= 1, 10000, 'the bot to start');
+    await new Promise((r) => setTimeout(r, 300)); // let it install its SIGTERM handler
+    const botPid = s.calls()[0].pid;
+    process.kill(s.pid, 'SIGINT');
+    await new Promise((r) => setTimeout(r, 300));
+    // The dying copy says it is closing (with a proof), not "here I am".
+    const n = crypto.randomBytes(18).toString('base64url');
+    const ping = await fetch(s.base + '/api/ping?n=' + n);
+    assert.strictEqual(ping.status, 503);
+    assert.strictEqual((await ping.json()).closing, true);
+    // A copy started now waits, then starts for real.
+    const t0 = Date.now();
+    const out = await new Promise((resolve) => {
+      const c = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--port', String(s.port), '--data', path.join(s.tmp, 'data')], { env: { ...process.env, CLAUDE_BIN: path.join(__dirname, 'fake-claude.js'), FAKE_CLAUDE_DIR: path.join(s.tmp, 'fake2') }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let log = '';
+      c.stdout.on('data', (d) => { log += d; if (/sign in/.test(log)) { c.kill(); } });
+      c.stderr.on('data', (d) => { log += d; });
+      setTimeout(() => c.kill(), 20000);
+      c.on('exit', () => resolve(log));
+    });
+    assert.match(out, /open this link to sign in/, out);
+    assert.doesNotMatch(out, /already running/);
+    assert.ok(Date.now() - t0 > 2000, 'it waited for the old copy');
+    let botAlive = true;
+    try { process.kill(botPid, 0); } catch { botAlive = false; }
+    assert.strictEqual(botAlive, false, 'the stuck bot was killed with the old copy');
+  } finally { await s.stop(); }
 });

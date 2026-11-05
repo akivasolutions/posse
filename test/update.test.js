@@ -284,9 +284,9 @@ test('full update: downloads, stops the running copy, swaps files, keeps data; t
     assert.strictEqual(fs.readFileSync(path.join(app, 'NEWFILE.md'), 'utf8'), 'v10');
     assert.ok(!fs.existsSync(path.join(app, '.update', 'journal.json')));
     // Another update holding the lock: this one starts nothing at all.
-    fs.writeFileSync(path.join(app, '.update.lock'), String(process.pid));
+    const held = await U.lock(app); // as if another update window were running
     const locked = await run([]);
-    fs.rmSync(path.join(app, '.update.lock'), { force: true });
+    held();
     assert.strictEqual(locked.code, 1, locked.log);
     assert.match(locked.log, /Another update is already running/);
     assert.doesNotMatch(locked.log, /Starting the version|open this link/);
@@ -412,23 +412,25 @@ test('probes settle even when the port answers headers and then stalls', async (
   } finally { hang.close(); hang.closeAllConnections && hang.closeAllConnections(); }
 });
 
-test('one update at a time; a lock left by a closed update is taken over', () => {
+test('one update at a time; the lock goes away with the process that held it, however it ended', async () => {
   const app = tmpDir('posse-lock-');
-  const unlock = U.lock(app);
-  // Another process holding the lock (this test runner's parent is alive).
-  fs.writeFileSync(path.join(app, '.update.lock'), String(process.ppid));
-  assert.throws(() => U.lock(app), /Another update is already running/);
-  // A lock from a process that no longer exists.
-  fs.writeFileSync(path.join(app, '.update.lock'), '999999');
-  const again = U.lock(app);
-  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(app, '.update.lock'), 'utf8')).pid, process.pid);
-  again();
-  // A lock whose process number is in use again, but that was written before the last reboot.
-  fs.writeFileSync(path.join(app, '.update.lock'), JSON.stringify({ pid: process.ppid, startedAt: Date.now() - (require('os').uptime() + 3600) * 1000 }));
-  const third = U.lock(app);
-  third();
-  assert.ok(!fs.existsSync(path.join(app, '.update.lock')));
+  // The same folder through a symlink (on macOS the temp folder is one already) shares the lock.
+  const link = app + '-link';
+  try { fs.symlinkSync(app, link, 'junction'); } catch {}
+  const unlock = await U.lock(app);
+  if (fs.existsSync(link)) await assert.rejects(U.lock(link), /Another update is already running/);
+  await assert.rejects(U.lock(app), /Another update is already running/);
   unlock();
+  await new Promise((r) => setTimeout(r, 50));
+  (await U.lock(app))();
+  await new Promise((r) => setTimeout(r, 50));
+  // Another process holds it, then is killed outright (a closed window): the lock is free again.
+  const holder = spawn(process.execPath, ['-e', 'require(' + JSON.stringify(path.join(ROOT, 'update.js')) + ').lock(' + JSON.stringify(app) + ').then(() => { console.log("held"); setInterval(() => {}, 1000); })'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  await new Promise((r) => holder.stdout.on('data', (d) => { if (/held/.test(d)) r(); }));
+  await assert.rejects(U.lock(app), /Another update is already running/);
+  holder.kill('SIGKILL');
+  await new Promise((r) => holder.on('exit', r));
+  (await U.lock(app))();
 });
 
 test('recovery still works after the old files were put back by hand', () => {
@@ -499,13 +501,26 @@ test('a restart during shutdown waits for the old copy, and no bot outlives it',
   } finally { await s.stop(); }
 });
 
-test('a read-only file in the folder does not block the update (Windows refuses to replace one)', () => {
-  const f = swapFixture();
+test('read-only files do not block an update or its recovery', () => {
+  // A read-only server.js (Windows refuses to replace one; macOS doesn't mind).
+  let f = swapFixture();
   fs.chmodSync(path.join(f.app, 'server.js'), 0o444);
-  // A read-only leftover from an interrupted copy, too.
-  fs.mkdirSync(path.join(f.app, '.update', 'previous'), { recursive: true });
+  fs.chmodSync(path.join(f.app, '.posse-version'), 0o444); // and a read-only version note
   U.install(f.app, f.files, f.commit);
   assert.strictEqual(f.r('server.js'), '// new server');
+  assert.ok(!fs.existsSync(path.join(f.app, '.update', 'journal.json')), 'finished, not left half done');
+  // Recovery that finds a read-only leftover from an interrupted copy (copying onto it would fail everywhere).
+  f = swapFixture();
+  const st = path.join(f.app, '.update');
+  fs.mkdirSync(path.join(st, 'new'), { recursive: true });
+  fs.mkdirSync(path.join(st, 'previous'), { recursive: true });
+  fs.writeFileSync(path.join(st, 'new', 'server.js'), '// new server');
+  fs.writeFileSync(path.join(st, 'previous', 'server.js.part'), 'half a copy');
+  fs.chmodSync(path.join(st, 'previous', 'server.js.part'), 0o444);
+  fs.writeFileSync(path.join(st, 'journal.json'), JSON.stringify({ tops: ['server.js'], gone: [], commit: '' }));
+  assert.strictEqual(U.recover(f.app), true);
+  assert.strictEqual(f.r('server.js'), '// new server');
+  assert.strictEqual(fs.readFileSync(path.join(st, 'previous', 'server.js'), 'utf8'), '// old server');
 });
 
 test('starting a half-updated folder directly says how to finish, even with lib/ missing', () => {
@@ -527,10 +542,14 @@ test('a tool a bot started is killed with Posse, even after the bot itself exite
     await s.api('POST', '/api/channels/dm:' + chief.id + '/messages', { text: 'tool\n@@grandchild\n@@sleep 30000' });
     const pidFile = path.join(s.tmp, 'fake', 'grandchild.pid');
     await s.waitFor(() => fs.existsSync(pidFile), 10000, 'the tool to start');
+    await s.waitFor(() => /^\d+$/.test(fs.readFileSync(pidFile, 'utf8')), 5000, 'the pid');
     gpid = +fs.readFileSync(pidFile, 'utf8');
     const exited = new Promise((r) => s.child.on('exit', r));
+    const t0 = Date.now();
     process.kill(s.pid, 'SIGINT');
+    setTimeout(() => { try { process.kill(s.pid, 'SIGINT'); } catch {} }, 300); // a second Ctrl+C changes nothing
     await Promise.race([exited, new Promise((r) => setTimeout(r, 9000))]);
+    assert.ok(Date.now() - t0 >= 3900, 'the tool ignored the polite stop, so it took the 4 s hard kill');
     let alive = true;
     try { process.kill(gpid, 0); } catch { alive = false; }
     assert.strictEqual(alive, false, 'the tool was killed with Posse');

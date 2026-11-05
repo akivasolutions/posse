@@ -126,8 +126,8 @@ async function main() {
       fs.writeFileSync(f, 'written by the bot');
     } else if (/^@@grandchild\b/.test(line)) {
       // A tool that ignores SIGTERM and keeps this process's output open after it exits.
-      const g = require('child_process').spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ['ignore', 'inherit', 'inherit'] });
-      fs.writeFileSync(path.join(dir, 'grandchild.pid'), String(g.pid));
+      // It writes its pid file only once its SIGTERM handler is in place.
+      require('child_process').spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});require('fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)", path.join(dir, 'grandchild.pid')], { stdio: ['ignore', 'inherit', 'inherit'] });
     } else if (/^@@ignore-term\b/.test(line)) {
       process.on('SIGTERM', () => {});
     } else if ((m = /^@@sleep\s+(\d+)/.exec(line))) {

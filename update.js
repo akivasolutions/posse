@@ -23,7 +23,7 @@ const MAX_UNPACKED = 200 * 1024 * 1024;
 const MAX_FILES = 5000;
 // Top-level names an update never replaces or removes.
 // Compared without case: Windows and macOS treat ".Git" and ".git" as the same folder.
-const KEEP = new Set(['.git', '.update', '.update.lock', '.posse-version', 'data', 'node', 'node_modules']);
+const KEEP = new Set(['.git', '.update', '.posse-version', 'data', 'node', 'node_modules']);
 const kept = (top) => KEEP.has(String(top).toLowerCase());
 // A download must contain these to count as Posse.
 const REQUIRED = ['package.json', 'server.js', 'update.js', 'lib/app.js', 'public/index.html'];
@@ -245,6 +245,7 @@ async function findRunning(data, argv) {
   const tries = [];
   const add = (port, h) => { if (Number.isInteger(port) && port > 0 && port < 65536 && !tries.some((t) => t.port === port && t.host === h)) tries.push({ port, host: h }); };
   add(last.port, reach(last.host)); // exactly where it said it listens (a LAN address too)
+  if (String(last.host).toLowerCase() === 'localhost') add(last.port, '::1'); // older builds bound ::1 for it
   add(parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747, reach(argVal(argv, 'host', 'POSSE_HOST')));
   add(4747, '127.0.0.1');
   for (const t of tries) {
@@ -289,26 +290,37 @@ async function clearTheWay(data, argv) {
   if (Number.isInteger(last.port) && Number.isInteger(last.pid) && last.pid !== process.pid && alive(last.pid) && await connects(last.port, reach(last.host))) throw busy(last.port);
 }
 
-// One update at a time in this folder. A lock left by an update that was closed is taken over.
-function lock(app) {
-  const f = path.join(app, '.update.lock');
-  const mine = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
-  for (let i = 0; i < 3; i++) {
-    try {
-      fs.writeFileSync(f, mine, { flag: 'wx' });
-      return () => { try { if (fs.readFileSync(f, 'utf8') === mine) fs.unlinkSync(f); } catch {} };
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      let held = {};
-      try { const raw = fs.readFileSync(f, 'utf8'); held = /^\d+$/.test(raw.trim()) ? { pid: +raw, startedAt: Date.now() } : JSON.parse(raw); } catch {}
-      // Taken over if its process is gone, or it is from before the computer last started.
-      if (Number.isInteger(held.pid) && held.pid !== process.pid && alive(held.pid) && !beforeBoot(held.startedAt)) {
-        throw Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true });
-      }
-      fs.rmSync(f, { force: true });
-    }
+// One update at a time in this folder. The lock is a named pipe (Windows) or a unix socket that
+// only a running updater listens on, so the operating system releases it when that process ends,
+// however it ends: no process numbers, clocks or reboots involved.
+function lockAddress(app) {
+  // The real path, so the same folder reached through a link or another spelling shares one lock.
+  let real = path.resolve(app);
+  try { real = fs.realpathSync.native(real); } catch {}
+  const id = crypto.createHash('sha256').update(real.toLowerCase()).digest('hex').slice(0, 16);
+  return process.platform === 'win32' ? '\\\\?\\pipe\\posse-update-' + id : path.join(os.tmpdir(), 'posse-update-' + id + '.sock');
+}
+async function lock(app) {
+  const addr = lockAddress(app);
+  const hold = () => new Promise((resolve, reject) => {
+    const srv = net.createServer((c) => c.destroy());
+    srv.once('error', reject);
+    srv.listen(addr, () => { srv.unref(); resolve(() => srv.close()); });
+  });
+  try { return await hold(); } catch (e) {
+    if (e.code !== 'EADDRINUSE') throw e;
   }
-  throw new Error('Could not start the update (lock file).');
+  // On macOS and Linux the socket file outlives a process that was killed; nobody answering on it
+  // means it is left over.
+  const answered = await new Promise((resolve) => {
+    const c = net.connect(addr, () => { c.destroy(); resolve(true); });
+    c.on('error', () => resolve(false));
+  });
+  if (!answered && process.platform !== 'win32') {
+    try { fs.unlinkSync(addr); } catch {}
+    try { return await hold(); } catch {}
+  }
+  throw Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true });
 }
 
 // ---------------- installing ----------------
@@ -408,9 +420,15 @@ function rollBack(app, plan) {
 }
 
 function finishSwap(app, plan) {
-  fs.writeFileSync(path.join(app, '.posse-version'), JSON.stringify({ commit: plan.commit || '', top: plan.tops, updatedAt: new Date().toISOString() }, null, 2) + '\n');
-  fs.rmSync(path.join(stageDir(app), 'new'), { recursive: true, force: true });
+  // Every file is in place now. The version note is informational: a failure to write it (a
+  // read-only file, say) must not leave the update looking unfinished.
+  try {
+    const v = path.join(app, '.posse-version');
+    fs.writeFileSync(v + '.part', JSON.stringify({ commit: plan.commit || '', top: plan.tops, updatedAt: new Date().toISOString() }, null, 2) + '\n');
+    replaceFile(v + '.part', v);
+  } catch {}
   fs.rmSync(journalFile(app), { force: true });
+  fs.rmSync(path.join(stageDir(app), 'new'), { recursive: true, force: true });
 }
 
 const which = (e) => (e.path ? path.basename(e.path) : 'a file') + ' (' + (e.code || e.message) + ')';
@@ -510,7 +528,7 @@ async function main(argv) {
   const app = __dirname;
   const data = dataDir(app, argv);
   console.log('\n  Posse update');
-  const unlock = lock(app);
+  const unlock = await lock(app);
   try { return await run(app, data, argv); } finally { unlock(); }
 }
 

@@ -653,7 +653,7 @@ function openBrowser(u) {
 let closing = false;
 let stopRequested = false;
 async function shutdown() {
-  if (closing) { console.log('  Stopping now.'); process.exit(1); } // a second Ctrl+C
+  if (closing) return; // npm and the terminal can both deliver one Ctrl+C; the stop is already under way
   closing = true;
   console.log('\n  Stopping Posse (bots get a few seconds to finish)…');
   // Stop the bots first and only then let go of the port: whoever waits for the port to close

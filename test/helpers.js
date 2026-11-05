@@ -11,9 +11,9 @@ function freePort() {
   return new Promise((resolve) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
 }
 
-async function startServer() {
+async function startServer(opts = {}) {
   const port = await freePort();
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bullpen-test-'));
+  const tmp = opts.tmp || fs.mkdtempSync(path.join(os.tmpdir(), 'bullpen-test-'));
   const fake = path.join(__dirname, process.platform === 'win32' ? 'fake-claude.cmd' : 'fake-claude.js');
   const env = { ...process.env, CLAUDE_BIN: fake, FAKE_CLAUDE_DIR: path.join(tmp, 'fake'), BULLPEN_FOLDER_QUIET_MS: '400', BULLPEN_FOLDER_GAP_MS: '600', BULLPEN_LIVE_APPROVAL_MS: '3000' };
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--port', String(port), '--data', path.join(tmp, 'data')], { env, stdio: ['ignore', 'pipe', 'pipe'] });

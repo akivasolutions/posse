@@ -52,23 +52,30 @@
   let KEY = '';
   let VT = '';
   try { KEY = localStorage.getItem(KEY_STORE) || ''; } catch {}
-  {
+  // A key from a sign-in link (#key=…) is checked before it replaces the stored one, so a wrong or
+  // stale link can't sign you out.
+  function linkKey() {
     const m = /(?:^#|&)key=([^&]+)/.exec(location.hash);
-    if (m) {
-      KEY = decodeURIComponent(m[1]);
-      try { localStorage.setItem(KEY_STORE, KEY); } catch {}
-      history.replaceState(null, '', location.pathname + location.search);
-    }
-  }
-  // Pasting a sign-in link into a tab that's already open only changes the #fragment, which
-  // doesn't reload the page; pick the key up and start over.
-  window.addEventListener('hashchange', () => {
-    const m = /(?:^#|&)key=([^&]+)/.exec(location.hash);
-    if (!m) return;
-    try { localStorage.setItem(KEY_STORE, decodeURIComponent(m[1])); } catch {}
+    if (!m) return null;
     history.replaceState(null, '', location.pathname + location.search);
-    location.reload();
+    try { return decodeURIComponent(m[1]); } catch { return ''; }
+  }
+  async function keyWorks(k) {
+    if (!k) return false;
+    const r = await fetch('/api/whoami', { headers: { Authorization: 'Bearer ' + k } }).catch(() => null);
+    return !!(r && r.ok);
+  }
+  let pendingLinkKey = linkKey();
+  // Pasting a sign-in link into a tab that's already open only changes the #fragment, which
+  // doesn't reload the page; check the key and start over.
+  window.addEventListener('hashchange', async () => {
+    const k = linkKey();
+    if (k === null) return;
+    if (await keyWorks(k)) { try { localStorage.setItem(KEY_STORE, k); } catch {} location.reload(); }
+    else toast('That sign-in link is not valid (the key may have been changed).', true);
   });
+  // Another tab made a new key: adopt it.
+  window.addEventListener('storage', (e) => { if (e.key === KEY_STORE && e.newValue && e.newValue !== KEY) location.reload(); });
   const authH = () => ({ Authorization: 'Bearer ' + KEY, 'X-Bullpen': '1' });
   const vt = (url) => url + (url.includes('?') ? '&' : '?') + 'vt=' + encodeURIComponent(VT);
   // Exports and backups need the key itself, so they are fetched (with the header) and saved from memory.
@@ -109,7 +116,14 @@
     const opts = { method, headers: authH() };
     if (body !== undefined) { opts.headers['content-type'] = 'application/json'; opts.body = JSON.stringify(body); }
     const r = await fetch(url, opts);
-    if (r.status === 401) { try { localStorage.removeItem(KEY_STORE); } catch {} signIn('Please sign in again.'); throw new Error('Sign in required'); }
+    if (r.status === 401) {
+      let stored = '';
+      try { stored = localStorage.getItem(KEY_STORE) || ''; } catch {}
+      if (stored && stored !== KEY) { location.reload(); throw new Error('Signing in again'); } // another tab rotated the key
+      try { if (stored === KEY) localStorage.removeItem(KEY_STORE); } catch {}
+      signIn('Please sign in again.');
+      throw new Error('Sign in required');
+    }
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
     return data;
@@ -534,6 +548,9 @@
     }
   }
 
+  // Don't redraw the inbox under someone who is typing an answer in it.
+  function inboxBusy() { return $$('#inbox input, #inbox textarea').some((x) => x.value || x === document.activeElement); }
+
   // Short description of what an "Always allow" rule covers, for the button label.
   function ruleScope(rule) {
     let m = /^Read\(\/\/(.*)\/\*\*\)$/.exec(rule);
@@ -604,7 +621,7 @@
     else if (act === 'retry') attempt(() => api('POST', chUrl(ch) + '/messages/' + encodeURIComponent(id) + '/retry'));
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && e.target.matches('#msgs [data-role=q-text]')) {
+    if (e.key === 'Enter' && e.target.matches('#msgs [data-role=q-text], #inbox [data-role=q-text]')) {
       const card = e.target.closest('[data-id]');
       const btn = card && $('[data-act=q-send]', card);
       if (btn) btn.click();
@@ -1196,7 +1213,7 @@
       sec = await attempt(() => api('GET', '/api/security'));
       if (!sec || !$('#sec-key')) return;
       $('#sec-key').value = sec.accessKey;
-      const label = { approval: 'Approval', escalation: 'Escalation', 'bot.changed': 'Bot changed', 'bot.created': 'Bot created', 'bot.deleted': 'Bot deleted', 'settings.changed': 'Settings', webhook: 'Webhook', 'webhook.limited': 'Webhook limited', 'login.failed': 'Failed sign-in', 'access-key.rotated': 'New access key' };
+      const label = { approval: 'Approval', escalation: 'Escalation', 'bot.changed': 'Bot changed', 'bot.created': 'Bot created', 'bot.deleted': 'Bot deleted', 'settings.changed': 'Settings', webhook: 'Webhook', 'webhook.limited': 'Webhook limited', 'auth.failed': 'Failed sign-in', 'access-key.rotated': 'New access key' };
       $('#sec-audit').innerHTML = sec.audit.length ? sec.audit.map((r) => '<div style="padding:6px 10px;border-bottom:1px solid var(--line)"><b>' + esc(label[r.type] || r.type) + '</b> <span style="color:var(--muted)">' + esc(fmtTime(r.ts)) + '</span><br>' +
         esc([r.bot, r.tool, r.decision, r.detail, r.note].filter(Boolean).join(' · ')) + '</div>').join('') : '<div style="padding:8px;color:var(--muted)">Nothing yet.</div>';
     };
@@ -1372,7 +1389,7 @@
       case 'memory': if (V.pane === 'info' && V.dirtyMem !== ev.botId && V.ch === 'dm:' + ev.botId) renderPane(); break;
       case 'config': S.config = ev.config; if (ev.cli) S.cli = ev.cli; applyTheme(); renderSide(); if (isChat(V.ch)) { renderHead(); } { const bn = $('.banner'); const nb = banner(); if (bn) bn.outerHTML = nb || ''; else if (nb) $('#main').insertAdjacentHTML('afterbegin', nb); } break;
       case 'usage': S.usage.today = ev.today; renderSide(); break;
-      case 'pending': S.pendingCount = ev.count; renderSide(); if (V.ch === 'view:inbox') renderView(); break;
+      case 'pending': S.pendingCount = ev.count; renderSide(); if (V.ch === 'view:inbox' && !inboxBusy()) renderView(); break;
       case 'activity': {
         const b = botById(ev.botId);
         if (b && b.status) { b.status.activity = ev.text; if (isChat(V.ch)) { renderHead(); renderLive(); } }
@@ -1403,6 +1420,11 @@
 
   // ---------------- boot ----------------
   (async function boot() {
+    if (pendingLinkKey !== null) {
+      if (await keyWorks(pendingLinkKey)) { KEY = pendingLinkKey; try { localStorage.setItem(KEY_STORE, KEY); } catch {} }
+      else if (!KEY) return signIn('That sign-in link is not valid. The key may have been changed; check the Bullpen window.');
+      else setTimeout(() => toast('That sign-in link is not valid; you are still signed in.', true), 500);
+    }
     if (!KEY) return signIn('');
     try { await refreshState(); } catch (e) { if (KEY && e.message !== 'Sign in required') document.body.innerHTML = '<div class="empty"><h3>Can\'t reach Bullpen</h3><p>' + esc(e.message) + '</p></div>'; return; }
     setInterval(() => { api('GET', '/api/whoami').then((r) => { if (r.vt !== VT) { VT = r.vt; connect(); } }).catch(() => {}); }, 3600e3);

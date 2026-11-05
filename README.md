@@ -1,6 +1,6 @@
-# Bullpen
+# Posse
 
-A local team of persistent AI bots, powered by the [Claude Code](https://docs.claude.com/claude-code) CLI.
+**Round up a team of AI bots that work for you.** Posse is a local team of persistent AI bots, powered by the [Claude Code](https://docs.claude.com/claude-code) CLI.
 
 You create bots, each with its own name, role, instructions, working folder, memory and chat, and talk to them like coworkers. One **primary bot** takes any request and hands the work to the right specialist. Specialists work in their own long-running conversations, **report back automatically**, and delegate to or message each other when they need to. Everything happens in one chat app on your own computer.
 
@@ -52,39 +52,39 @@ Each running bot turn adds one Claude Code process; *Bots working at once* (Sett
 
 **Windows (no admin rights needed)**
 
-1. Download Bullpen: on GitHub, **Code → Download ZIP**, and unzip it anywhere (for example Documents). Or in a Command Prompt:
+1. Download Posse: on GitHub, **Code → Download ZIP**, and unzip it anywhere (for example Documents). Or in a Command Prompt:
    ```bat
-   curl -L -o bullpen.zip https://github.com/youngharold/bullpen/archive/refs/heads/main.zip && tar -xf bullpen.zip
+   curl -L -o posse.zip https://github.com/youngharold/posse/archive/refs/heads/main.zip && tar -xf posse.zip
    ```
-2. In the `bullpen-main` folder, double-click **`start.cmd`**. If Node.js isn't installed, it offers to download the official one from nodejs.org (about 30 MB, checksum-verified, into your own user folder). Your browser opens, signed in.
+2. In the `posse-main` folder, double-click **`start.cmd`**. If Node.js isn't installed, it offers to download the official one from nodejs.org (about 30 MB, checksum-verified, into your own user folder). Your browser opens, signed in.
 
 If Windows asks whether to run `start.cmd`, choose **Run** (or, before unzipping, right-click the ZIP → Properties → **Unblock**).
 
 **macOS and Linux**
 
 ```bash
-git clone https://github.com/youngharold/bullpen
-cd bullpen
+git clone https://github.com/youngharold/posse
+cd posse
 node server.js --open
 ```
 
 On macOS you can double-click `start.command` instead (the first time, right-click → Open).
 
-Starting Bullpen again while it's already running just opens the running one.
+Starting Posse again while it's already running just opens the running one.
 
 ## Update
 
 - **Windows:** double-click **`update.cmd`**. **macOS:** double-click `update.command`. **Anywhere:** `node update.js`.
 
-It downloads the latest version (a git checkout uses `git pull` instead), stops the running Bullpen, swaps in the new files and starts it again. Bots that were in the middle of something pick up where they left off. Your bots, chats and settings live in the data folder, which an update never touches. The previous version is kept in `.update/previous` until the next update. `node update.js --check` only checks; `--no-start` updates without starting. Settings → About shows the version you have.
+It downloads the latest version (a git checkout uses `git pull` instead), stops the running Posse, swaps in the new files and starts it again. Bots that were in the middle of something pick up where they left off. Your bots, chats and settings live in the data folder, which an update never touches. The previous version is kept in `.update/previous` until the next update. `node update.js --check` only checks; `--no-start` updates without starting. Settings → About shows the version you have.
 
 The window shows a **sign-in link** with your access key. `--open` opens it for you, and the browser remembers the key after that. The key is also saved in `secret.json` in the data folder.
 
 | Flag | Env | Default | |
 |---|---|---|---|
-| `--port` | `BULLPEN_PORT` | `4747` | Port to listen on |
-| `--data` | `BULLPEN_DATA` | `~/.bullpen` | Where everything is stored |
-| `--host` | `BULLPEN_HOST` | `127.0.0.1` | Leave this alone unless you know you need it |
+| `--port` | `POSSE_PORT` | `4747` | Port to listen on |
+| `--data` | `POSSE_DATA` | `~/.posse` | Where everything is stored |
+| `--host` | `POSSE_HOST` | `127.0.0.1` | Leave this alone unless you know you need it |
 | `--open` | | | Open the sign-in link in your browser |
 | | `CLAUDE_BIN` | auto | Path to the `claude` executable (also in Settings) |
 
@@ -105,21 +105,21 @@ An example setup for managing client accounts:
 ## How it works
 
 ```
-Browser ⇄ Bullpen (Node) ── one turn ──▶ claude -p --resume <bot's session>
+Browser ⇄ Posse (Node) ── one turn ──▶ claude -p --resume <bot's session>
               ▲                               │
               └──── MCP over loopback HTTP ◀──┘  (team, cards, memory, skills, routines, approvals)
 ```
 
 - **One turn** is one `claude -p --output-format stream-json` run in the bot's working folder. It resumes the bot's session, with the waiting inputs for that chat batched in. Each input is labeled, for example `[From you]`, `[Task #12 from @chief]`, `[Report on task #12 …]`, `[Message from @x]`, `[Group chat …]` or `[Routine …]`.
-- **Bullpen's tools** reach the bot over MCP. Bullpen itself serves them at `/mcp`, protected by a per-turn token, so a turn needs no extra helper process. A separate-process fallback is in Settings.
-- **Approvals** use Claude Code's `--permission-prompt-tool`. Cards show everything they approve, in full; anything too large to review is refused. Claude Code stops waiting on a permission request after 5 minutes, so Bullpen answers within 4½. If you haven't decided by then, it tells the bot to move on, keeps the card open, and gives the bot a one-time permission for exactly that action when you approve.
+- **Posse's tools** reach the bot over MCP. Posse itself serves them at `/mcp`, protected by a per-turn token, so a turn needs no extra helper process. A separate-process fallback is in Settings.
+- **Approvals** use Claude Code's `--permission-prompt-tool`. Cards show everything they approve, in full; anything too large to review is refused. Claude Code stops waiting on a permission request after 5 minutes, so Posse answers within 4½. If you haven't decided by then, it tells the bot to move on, keeps the card open, and gives the bot a one-time permission for exactly that action when you approve.
 - **Long conversations:** when instructions, the team, memory or skills change, the bot gets a `[Context update]` on its next turn. When its context passes the session limit (150k tokens by default), it saves notes and starts fresh with its memory and a recap of the chat.
 
 ### Permission levels (per bot)
 
 | Level | What the bot can do without asking |
 |---|---|
-| **Ask me** (default) | Read and search inside its working folder, web search, and use Bullpen tools. Everything else shows an approval card. |
+| **Ask me** (default) | Read and search inside its working folder, web search, and use Posse tools. Everything else shows an approval card. |
 | **Auto-edit** | Also edit files in its folder. Commands still need approval. |
 | **Auto-review** | Claude Code's auto mode: a safety classifier allows routine actions and blocks risky ones. |
 | **Read only** | Never edits or runs commands. |
@@ -139,7 +139,7 @@ Bots that talk to bots can loop. Settings → Limits controls:
 
 ## Security
 
-Bullpen is built for machines you share with other people and for bots that read content you don't control.
+Posse is built for machines you share with other people and for bots that read content you don't control.
 
 - **Access key:**
   - every request needs it, sent as a header from the browser's storage for this exact address;
@@ -147,7 +147,7 @@ Bullpen is built for machines you share with other people and for bots that read
   - each page or file link carries its own signed token that opens only that one item and changes daily, the live update stream uses a separate read-only token, and exports and backups use one-time download tickets;
   - Settings → Security shows the key and makes a new one, which signs out every other browser.
 - **Private data folder:**
-  - the default is `~/.bullpen`, readable only by your account;
+  - the default is `~/.posse`, readable only by your account;
   - the backup download leaves out the access key.
 - **Bots are isolated from your settings:**
   - they load no Claude Code settings files: not your personal allow-rules, and not rules a working folder ships in `.claude/settings*.json` (a downloaded folder could otherwise pre-approve commands);
@@ -168,7 +168,7 @@ Bullpen is built for machines you share with other people and for bots that read
 ## Data folder
 
 ```
-~/.bullpen/
+~/.posse/
   config.json             settings
   secret.json             access key
   bots/<id>/bot.json      a bot's profile, settings and session id
@@ -185,15 +185,15 @@ Bullpen is built for machines you share with other people and for bots that read
   trash/                  deleted bots and chats
 ```
 
-Only the most recent month of each chat is loaded into memory, and chats nobody has looked at for 10 minutes are dropped from memory, so months of history stay cheap. If you used an earlier version that kept data in `./data`, Bullpen keeps using that folder until you move it.
+Only the most recent month of each chat is loaded into memory, and chats nobody has looked at for 10 minutes are dropped from memory, so months of history stay cheap. If you used an earlier version that kept data in `./data`, Posse keeps using that folder until you move it.
 
 ## Troubleshooting
 
 - **"Claude Code is not signed in on this computer":** the Claude Code login expired. Open a terminal, run `claude`, type `/login` and sign in, then press **Retry** on the failed message.
 - **The update can't download at work:** it tries Node's own download first, then `curl` (which uses the Windows certificate store, as many company networks require). If both are blocked, download the ZIP in your browser and unzip it over the old folder; your data is elsewhere and stays put.
-- **"Claude Code CLI not found":** set its path in Settings → Bots & Claude, or start Bullpen with `CLAUDE_BIN` set.
+- **"Claude Code CLI not found":** set its path in Settings → Bots & Claude, or start Posse with `CLAUDE_BIN` set.
 - **Bots can't reach Claude at work, but `claude` works in a terminal:** company proxy or gateway settings sometimes live outside the settings `env` block. Turn on *Use my Claude Code settings and connectors* for that bot.
-- **An older Claude Code can't connect to Bullpen's tools:** set Settings → Bots & Claude → Tool connection to *Separate helper process*.
+- **An older Claude Code can't connect to Posse's tools:** set Settings → Bots & Claude → Tool connection to *Separate helper process*.
 
 ## Development
 
@@ -201,7 +201,7 @@ Only the most recent month of each chat is loaded into memory, and chats nobody 
 npm test
 ```
 
-This runs about 75 tests on macOS, Linux and Windows: unit tests, storage tests, end-to-end tests, shutdown tests and updater tests. They use `test/fake-claude.js`, a stand-in for the CLI that speaks its stream-json format, keeps sessions, and calls Bullpen's real MCP endpoint. That covers delegation, approvals, cards, routines, group chats and security without spending any tokens.
+This runs about 75 tests on macOS, Linux and Windows: unit tests, storage tests, end-to-end tests, shutdown tests and updater tests. They use `test/fake-claude.js`, a stand-in for the CLI that speaks its stream-json format, keeps sessions, and calls Posse's real MCP endpoint. That covers delegation, approvals, cards, routines, group chats and security without spending any tokens.
 
 ## License
 

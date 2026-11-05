@@ -44,13 +44,13 @@ function tarGz(parts, commit = SHA) {
   const head = commit ? [entry('pax_global_header', paxRec('comment', commit), 'g')] : [];
   return zlib.gzipSync(Buffer.concat([...head, ...parts, Buffer.alloc(1024)]));
 }
-// Every file Bullpen ships, from this checkout, as archive entries under bullpen-main/.
+// Every file Posse ships, from this checkout, as archive entries under posse-main/.
 function repoEntries(edit = {}) {
   const out = [];
   const walk = (rel) => {
     for (const d of fs.readdirSync(path.join(ROOT, rel), { withFileTypes: true })) {
       const r = rel ? rel + '/' + d.name : d.name;
-      if (!rel && ['.git', 'node_modules', 'tasks', 'data', '.update', '.bullpen-version', 'docs'].includes(d.name)) continue;
+      if (!rel && ['.git', 'node_modules', 'tasks', 'data', '.update', '.posse-version', 'docs'].includes(d.name)) continue;
       if (d.name === '.DS_Store') continue;
       if (d.isDirectory()) walk(r);
       else if (d.isFile()) out.push([r, fs.readFileSync(path.join(ROOT, r))]);
@@ -59,46 +59,46 @@ function repoEntries(edit = {}) {
   walk('');
   const map = new Map(out);
   for (const [k, v] of Object.entries(edit)) { if (v === null) map.delete(k); else map.set(k, Buffer.from(v)); }
-  return [...map].map(([r, d]) => entry('bullpen-main/' + r, d, '0', /\.command$/.test(r) ? 0o755 : 0o644));
+  return [...map].map(([r, d]) => entry('posse-main/' + r, d, '0', /\.command$/.test(r) ? 0o755 : 0o644));
 }
 const tmpDir = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const minimal = () => [
-  entry('bullpen-main/', '', '5', 0o755),
-  entry('bullpen-main/package.json', JSON.stringify({ name: 'bullpen', version: '9.9.9' })),
-  entry('bullpen-main/server.js', '// new server'),
-  entry('bullpen-main/update.js', '// new updater'),
-  entry('bullpen-main/lib/app.js', '// new app'),
-  entry('bullpen-main/public/index.html', '<!doctype html>'),
+  entry('posse-main/', '', '5', 0o755),
+  entry('posse-main/package.json', JSON.stringify({ name: 'posse', version: '9.9.9' })),
+  entry('posse-main/server.js', '// new server'),
+  entry('posse-main/update.js', '// new updater'),
+  entry('posse-main/lib/app.js', '// new app'),
+  entry('posse-main/public/index.html', '<!doctype html>'),
 ];
 
 test('reads GitHub-style archives: pax commit, long paths, links skipped', () => {
-  const long = 'bullpen-main/public/' + 'x'.repeat(120) + '.txt';
+  const long = 'posse-main/public/' + 'x'.repeat(120) + '.txt';
   const gz = tarGz([
     ...minimal(),
     entry('PaxHeader', paxRec('path', long), 'x'),
     entry(long.slice(0, 100), 'long one'),
-    entry('bullpen-main/link', '', '2'),
+    entry('posse-main/link', '', '2'),
   ]);
   const { files, commit, pkg } = U.readArchive(gz);
   assert.strictEqual(commit, SHA);
   assert.strictEqual(pkg.version, '9.9.9');
-  assert.ok(files.some((f) => f.rel === long.slice('bullpen-main/'.length) && f.data.toString() === 'long one'));
+  assert.ok(files.some((f) => f.rel === long.slice('posse-main/'.length) && f.data.toString() === 'long one'));
   assert.ok(!files.some((f) => f.rel === 'link'));
-  assert.ok(files.every((f) => !f.rel.startsWith('bullpen-main')));
+  assert.ok(files.every((f) => !f.rel.startsWith('posse-main')));
 });
 
-test('rejects archives that are not Bullpen or could write outside the folder', () => {
+test('rejects archives that are not Posse or could write outside the folder', () => {
   const bad = (extra, msg) => assert.throws(() => U.readArchive(tarGz([...minimal(), ...extra])), msg);
-  bad([entry('bullpen-main/../evil.js', 'x')], /Unsafe/);
-  bad([entry('bullpen-main/lib/a\\..\\b.js', 'x')], /Unsafe/);
-  bad([entry('bullpen-main/lib/CON.js', 'x')], /Unsafe/);
-  bad([entry('bullpen-main/lib/ads.js:stream', 'x')], /Unsafe/);
+  bad([entry('posse-main/../evil.js', 'x')], /Unsafe/);
+  bad([entry('posse-main/lib/a\\..\\b.js', 'x')], /Unsafe/);
+  bad([entry('posse-main/lib/CON.js', 'x')], /Unsafe/);
+  bad([entry('posse-main/lib/ads.js:stream', 'x')], /Unsafe/);
   bad([entry('other-top/x.js', 'x')], /Unexpected/);
-  bad([entry('bullpen-main/LIB/APP.JS', 'x')], /Duplicate/);
-  assert.throws(() => U.readArchive(tarGz(minimal().filter((e) => !e.toString('utf8', 0, 100).includes('server.js')))), /not Bullpen/);
+  bad([entry('posse-main/LIB/APP.JS', 'x')], /Duplicate/);
+  assert.throws(() => U.readArchive(tarGz(minimal().filter((e) => !e.toString('utf8', 0, 100).includes('server.js')))), /not Posse/);
   const notUs = minimal();
-  notUs[1] = entry('bullpen-main/package.json', JSON.stringify({ name: 'something-else' }));
-  assert.throws(() => U.readArchive(tarGz(notUs)), /not Bullpen/);
+  notUs[1] = entry('posse-main/package.json', JSON.stringify({ name: 'something-else' }));
+  assert.throws(() => U.readArchive(tarGz(notUs)), /not Posse/);
   const broken = Buffer.concat(minimal());
   broken[600] ^= 0xff; // inside the second header
   assert.throws(() => U.readArchive(zlib.gzipSync(Buffer.concat([broken, Buffer.alloc(1024)]))), /damaged/);
@@ -106,7 +106,7 @@ test('rejects archives that are not Bullpen or could write outside the folder', 
 });
 
 test('install swaps the code, keeps data, .git and old ./data, and can tell when nothing changed', () => {
-  const app = tmpDir('bullpen-app-');
+  const app = tmpDir('posse-app-');
   const w = (rel, s) => { fs.mkdirSync(path.dirname(path.join(app, rel)), { recursive: true }); fs.writeFileSync(path.join(app, rel), s); };
   w('server.js', '// old server');
   w('lib/app.js', '// old app');
@@ -115,8 +115,8 @@ test('install swaps the code, keeps data, .git and old ./data, and can tell when
   w('.git/HEAD', 'ref: refs/heads/main');
   w('dropped.txt', 'was shipped before');
   w('mine.txt', 'the user put this here');
-  fs.writeFileSync(path.join(app, '.bullpen-version'), JSON.stringify({ commit: 'b'.repeat(40), top: ['server.js', 'lib', 'dropped.txt'] }));
-  const { files, commit } = U.readArchive(tarGz([...minimal(), entry('bullpen-main/.GIT/hooks/post-merge', 'evil'), entry('bullpen-main/Data/config.json', '{}')]));
+  fs.writeFileSync(path.join(app, '.posse-version'), JSON.stringify({ commit: 'b'.repeat(40), top: ['server.js', 'lib', 'dropped.txt'] }));
+  const { files, commit } = U.readArchive(tarGz([...minimal(), entry('posse-main/.GIT/hooks/post-merge', 'evil'), entry('posse-main/Data/config.json', '{}')]));
   assert.ok(!files.some((f) => /^(\.git|data)\//i.test(f.rel)), 'kept folders are dropped from the download, whatever their case');
   const before = U.changes(app, files);
   assert.ok(before.changed.length >= 4);
@@ -132,7 +132,7 @@ test('install swaps the code, keeps data, .git and old ./data, and can tell when
   assert.strictEqual(r('.git/HEAD'), 'ref: refs/heads/main');
   assert.ok(!fs.existsSync(path.join(app, '.git/hooks')));
   assert.strictEqual(r('mine.txt'), 'the user put this here');
-  const v = JSON.parse(r('.bullpen-version'));
+  const v = JSON.parse(r('.posse-version'));
   assert.strictEqual(v.commit, SHA);
   assert.ok(v.top.includes('lib') && v.top.includes('public'));
   const after = U.changes(app, files);
@@ -156,7 +156,7 @@ test('ping and stop: proof of the key without sending it; stop is signed and fre
     assert.strictEqual((await post({ t: old, sig: hm('stop:' + old) })).status, 403, 'stale');
     assert.strictEqual((await fetch(s.base + '/api/stop', { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'application/json' }, body: '{}' })).status, 403);
     assert.strictEqual((await post(null)).status, 403);
-    // The updater finds this Bullpen from its data folder and stops it.
+    // The updater finds this Posse from its data folder and stops it.
     const data = path.join(s.tmp, 'data');
     const found = await U.findRunning(data, []);
     assert.strictEqual(found.port, s.port);
@@ -202,20 +202,20 @@ test('starting a second copy on the same data opens the running one and touches 
 
 test('full update: downloads, stops the running copy, swaps files, keeps data; then says up to date', async () => {
   // A copy of this checkout without .git, like a ZIP download.
-  const app = tmpDir('bullpen-install-');
+  const app = tmpDir('posse-install-');
   for (const e of repoEntries()) {
-    const name = e.toString('utf8', 0, 100).replace(/\0.*$/s, '').slice('bullpen-main/'.length);
+    const name = e.toString('utf8', 0, 100).replace(/\0.*$/s, '').slice('posse-main/'.length);
     const size = parseInt(e.toString('utf8', 124, 135), 8);
     fs.mkdirSync(path.dirname(path.join(app, name)), { recursive: true });
     fs.writeFileSync(path.join(app, name), e.subarray(512, 512 + size));
   }
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   const gz = tarGz(repoEntries({ 'package.json': JSON.stringify({ ...pkg, version: '9.9.9' }, null, 2), 'NEWFILE.md': 'new in this version' }));
-  const srv = http.createServer((req, res) => { if (req.url === '/bullpen.tar.gz') { res.writeHead(200); res.end(gz); } else { res.writeHead(404); res.end(); } });
+  const srv = http.createServer((req, res) => { if (req.url === '/posse.tar.gz') { res.writeHead(200); res.end(gz); } else { res.writeHead(404); res.end(); } });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
-  const url = 'http://127.0.0.1:' + srv.address().port + '/bullpen.tar.gz';
-  const data = tmpDir('bullpen-data-');
-  const env = { ...process.env, CLAUDE_BIN: path.join(__dirname, 'fake-claude.js'), BULLPEN_UPDATE_URL: url, BULLPEN_DATA: data };
+  const url = 'http://127.0.0.1:' + srv.address().port + '/posse.tar.gz';
+  const data = tmpDir('posse-data-');
+  const env = { ...process.env, CLAUDE_BIN: path.join(__dirname, 'fake-claude.js'), POSSE_UPDATE_URL: url, POSSE_DATA: data };
   const port = 40000 + Math.floor(Math.random() * 20000);
   const running = spawn(process.execPath, [path.join(app, 'server.js'), '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let rlog = '';
@@ -237,7 +237,7 @@ test('full update: downloads, stops the running copy, swaps files, keeps data; t
     assert.match(chk.log, /An update is available \(9\.9\.9, aaaaaaa, 2 changed files\)/);
     const up = await run(['--no-start']);
     assert.strictEqual(up.code, 0, up.log);
-    assert.match(up.log, /Stopping the running Bullpen/);
+    assert.match(up.log, /Stopping the running Posse/);
     assert.match(up.log, /Updated to 9\.9\.9 \(aaaaaaa\): 2 files changed/);
     await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
     assert.notStrictEqual(running.exitCode, null, 'the running copy stopped\n' + rlog);

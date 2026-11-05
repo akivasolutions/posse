@@ -1,5 +1,5 @@
 'use strict';
-// End-to-end: real Bullpen server + real MCP server + fake Claude CLI.
+// End-to-end: real Posse server + real MCP server + fake Claude CLI.
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -53,9 +53,9 @@ test('a direct message gets a reply and the session persists', async () => {
   const lastCall = T.calls()[T.calls().length - 1];
   assert.ok(lastCall.settings && lastCall.settings.permissions.deny.includes('Edit(//**/.claude/**)'), 'bots can never write Claude Code settings');
   assert.ok(lastCall.settings.permissions.deny.includes('Edit(//**/.claude/settings*.json)'));
-  assert.ok(lastCall.autoMemoryOff, 'Claude Code auto-memory is off for bots (Bullpen keeps their memory)');
+  assert.ok(lastCall.autoMemoryOff, 'Claude Code auto-memory is off for bots (Posse keeps their memory)');
   assert.strictEqual(last[last.indexOf('--permission-mode') + 1], 'default');
-  assert.strictEqual(last[last.indexOf('--permission-prompt-tool') + 1], 'mcp__bullpen__approval_prompt');
+  assert.strictEqual(last[last.indexOf('--permission-prompt-tool') + 1], 'mcp__posse__approval_prompt');
 });
 
 test('primary bot delegates, specialist reports back, primary follows up', async () => {
@@ -282,10 +282,10 @@ test('security: CSRF header, Host check, MCP token', async () => {
     http.get({ host: '127.0.0.1', port: T.port, path: '/api/state', headers: { host: 'evil.example.com' }, agent: false }, (res) => { res.resume(); resolve(res.statusCode); }).on('error', () => resolve(0));
   });
   assert.strictEqual(evil, 403);
-  const mcp = await fetch(T.base + '/api/mcp/call', { method: 'POST', headers: { 'x-bullpen-run': 'nope', 'content-type': 'application/json' }, body: '{"tool":"team_list"}' });
+  const mcp = await fetch(T.base + '/api/mcp/call', { method: 'POST', headers: { 'x-posse-run': 'nope', 'content-type': 'application/json' }, body: '{"tool":"team_list"}' });
   assert.strictEqual((await mcp.json()).isError, true);
   const trav = await fetch(T.base + '/..%2f..%2fpackage.json');
-  assert.ok(!(await trav.text()).includes('"name": "bullpen"'));
+  assert.ok(!(await trav.text()).includes('"name": "posse"'));
 });
 
 test('deleting a bot fails its open tasks and moves it to trash', async () => {
@@ -394,11 +394,11 @@ test('access key: header auth, read-only view tokens, no cookies, no lockout', a
   assert.ok(!/\?t=/.test(raw), 'tokens are never stored in chat files');
   const badVt = await fetch(T.base + '/api/events?vt=nope');
   assert.strictEqual(badVt.status, 401);
-  const vtWrite = await fetch(T.base + '/api/bots?vt=' + vt, { method: 'POST', headers: { 'X-Bullpen': '1', 'content-type': 'application/json' }, body: '{"name":"x"}' });
+  const vtWrite = await fetch(T.base + '/api/bots?vt=' + vt, { method: 'POST', headers: { 'X-Posse': '1', 'content-type': 'application/json' }, body: '{"name":"x"}' });
   assert.strictEqual(vtWrite.status, 401, 'a view token cannot change anything');
   const vtState = await fetch(T.base + '/api/state?vt=' + vt);
   assert.strictEqual(vtState.status, 401, 'a view token cannot read the API');
-  const xsite = await fetch(T.base + '/api/bots', { method: 'POST', headers: { ...T.auth, 'X-Bullpen': '1', 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{"name":"x"}' });
+  const xsite = await fetch(T.base + '/api/bots', { method: 'POST', headers: { ...T.auth, 'X-Posse': '1', 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{"name":"x"}' });
   assert.strictEqual(xsite.status, 403);
   if (process.platform !== 'win32') {
     assert.strictEqual(fs.statSync(path.join(T.tmp, 'data')).mode & 0o777, 0o700);
@@ -406,7 +406,7 @@ test('access key: header auth, read-only view tokens, no cookies, no lockout', a
   }
 });
 
-test('markdown pages are self-contained (no requests back to Bullpen)', async () => {
+test('markdown pages are self-contained (no requests back to Posse)', async () => {
   const pages = (await T.api('GET', '/api/state')).data.pages;
   const md = pages.find((p) => p.format === 'markdown');
   const html = await (await fetch(T.base + '/pages/' + md.id, { headers: T.auth })).text();
@@ -641,7 +641,7 @@ test('folder routines: files someone else drops during a run trigger the next ru
 
 test('backup downloads the data folder without the access key', async () => {
   const r = await fetch(T.base + '/api/backup', { headers: T.auth });
-  assert.match(r.headers.get('content-disposition'), /bullpen-backup-.*\.tar\.gz/);
+  assert.match(r.headers.get('content-disposition'), /posse-backup-.*\.tar\.gz/);
   const tar = require('zlib').gunzipSync(Buffer.from(await r.arrayBuffer()));
   const names = [];
   for (let off = 0; off + 512 <= tar.length;) {
@@ -653,8 +653,8 @@ test('backup downloads the data folder without the access key', async () => {
     names.push(prefix ? prefix + '/' + name : name);
     off += 512 + Math.ceil(size / 512) * 512;
   }
-  assert.ok(names.includes('bullpen/config.json'));
-  assert.ok(names.some((n) => n.startsWith('bullpen/channels/')));
+  assert.ok(names.includes('posse/config.json'));
+  assert.ok(names.some((n) => n.startsWith('posse/channels/')));
   assert.ok(!names.some((n) => /secret\.json/.test(n)), 'access key not in the backup');
 });
 
@@ -718,7 +718,7 @@ test('security settings: key rotation, webhook rate limit, audit of settings cha
   await T.api('POST', '/api/bots/' + chief.id + '/clear-queue');
   await T.api('PATCH', '/api/bots/' + chief.id, { paused: false });
   await T.api('DELETE', '/api/routines/' + w.id);
-  const rot = await fetch(T.base + '/api/security/rotate-key', { method: 'POST', headers: { ...T.auth, 'X-Bullpen': '1' } });
+  const rot = await fetch(T.base + '/api/security/rotate-key', { method: 'POST', headers: { ...T.auth, 'X-Posse': '1' } });
   const fresh = await rot.json();
   assert.notStrictEqual(fresh.accessKey, before.accessKey);
   const old = await fetch(T.base + '/api/state', { headers: T.auth });

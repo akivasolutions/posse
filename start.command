@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bullpen for macOS. Double-click to start (the first time: right-click > Open).
+# Posse for macOS. Double-click to start (the first time: right-click > Open).
 # update.command runs this with --update.
 cd "$(dirname "$0")" || exit 1
 if ! command -v node >/dev/null 2>&1; then

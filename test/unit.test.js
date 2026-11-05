@@ -1,6 +1,6 @@
 'use strict';
 // Short folder-routine timers for tests (set before lib/scheduler is loaded; works on every OS).
-process.env.BULLPEN_FOLDER_QUIET_MS = process.env.BULLPEN_FOLDER_QUIET_MS || '300';
+process.env.POSSE_FOLDER_QUIET_MS = process.env.POSSE_FOLDER_QUIET_MS || '300';
 const test = require('node:test');
 const assert = require('node:assert');
 const { renderMarkdown } = require('../public/md.js');
@@ -65,7 +65,7 @@ test('mentions and handles', () => {
 
 test('tool steps read as plain English', () => {
   assert.strictEqual(describeTool('Read', { file_path: '/a/b/report.xlsx' }), 'Read report.xlsx');
-  assert.strictEqual(describeTool('mcp__bullpen__delegate_task', { to: 'analyst', title: 'Q3' }), 'Delegated to @analyst: Q3');
+  assert.strictEqual(describeTool('mcp__posse__delegate_task', { to: 'analyst', title: 'Q3' }), 'Delegated to @analyst: Q3');
 });
 
 test('permission mode names are read from the CLI help', () => {
@@ -121,7 +121,7 @@ test('folder routines catch up on files added while the folder was unwatched', a
   s.syncWatchers(); // folder back: watched again, and the new file is queued
   await until(() => s.watchers.size === 1);
   assert.strictEqual(s.watchers.size, 1);
-  await new Promise((res) => setTimeout(res, Number(process.env.BULLPEN_FOLDER_QUIET_MS || 20000) + 300));
+  await new Promise((res) => setTimeout(res, Number(process.env.POSSE_FOLDER_QUIET_MS || 20000) + 300));
   s.stop();
   fs.rmSync(dir, { recursive: true, force: true });
   assert.ok(fired.some((p) => /arrived-while-missing\.csv/.test(p)));

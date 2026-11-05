@@ -1,5 +1,5 @@
 @echo off
-REM Bullpen for Windows. Double-click to start; your browser opens, signed in.
+REM Posse for Windows. Double-click to start; your browser opens, signed in.
 REM If Node.js isn't installed, this offers to download it (about 30 MB, just for your account,
 REM no admin rights needed). update.cmd runs this with --update.
 setlocal
@@ -14,7 +14,7 @@ REM Keep this on one line: Windows has then read all of it before an update repl
 
 :nonode
 echo.
-echo   Bullpen needs Node.js 18.17 or newer. Install the LTS version from https://nodejs.org
+echo   Posse needs Node.js 18.17 or newer. Install the LTS version from https://nodejs.org
 echo   or ask your IT team, then run this again.
 echo.
 pause
@@ -23,7 +23,7 @@ exit /b 1
 :findnode
 set "NODE="
 for /f "delims=" %%i in ('where node 2^>nul') do if not defined NODE call :trynode "%%i"
-if not defined NODE if exist "%LOCALAPPDATA%\Bullpen\node\node.exe" call :trynode "%LOCALAPPDATA%\Bullpen\node\node.exe"
+if not defined NODE if exist "%LOCALAPPDATA%\Posse\node\node.exe" call :trynode "%LOCALAPPDATA%\Posse\node\node.exe"
 exit /b
 
 :trynode
@@ -31,9 +31,9 @@ exit /b
 exit /b
 
 :getnode
-set "NB=%LOCALAPPDATA%\Bullpen"
+set "NB=%LOCALAPPDATA%\Posse"
 echo.
-echo   Bullpen needs Node.js, and this computer doesn't have it (or has an old one).
+echo   Posse needs Node.js, and this computer doesn't have it (or has an old one).
 echo   It can download the official Node.js from nodejs.org (about 30 MB) into
 echo   %NB%\node, just for your account. No admin rights needed.
 echo.

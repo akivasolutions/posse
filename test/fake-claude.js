@@ -2,10 +2,10 @@
 'use strict';
 // A stand-in for the Claude Code CLI used by the tests. It speaks the same stream-json output,
 // keeps sessions on disk, and starts the MCP servers from --mcp-config just like the real CLI,
-// so tests exercise the real Bullpen tool path without spending tokens.
+// so tests exercise the real Posse tool path without spending tokens.
 //
 // It follows directives found at the start of lines in its input:
-//   @@call <tool> <json>     call mcp__bullpen__<tool> with the JSON arguments
+//   @@call <tool> <json>     call mcp__posse__<tool> with the JSON arguments
 //   @@perm <Tool> <json>     ask the --permission-prompt-tool for approval
 //   @@sleep <ms>             wait (to test Stop)
 //   @@fail <message>         end the turn with an error
@@ -43,7 +43,7 @@ process.stdin.on('end', () => main().catch((e) => { process.stderr.write(String(
 
 function startMcp(cfgPath) {
   const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-  const s = cfg.mcpServers.bullpen;
+  const s = cfg.mcpServers.posse;
   fs.appendFileSync(path.join(dir, 'transports.log'), (s.type || 'stdio') + '\n');
   if (s.type === 'http') {
     let seq = 0;
@@ -105,7 +105,7 @@ async function main() {
     if ((m = /^@@ctx\s+(\d+)/.exec(line))) { ctx = +m[1]; continue; }
     if ((m = /^@@call\s+(\w+)\s*(.*)$/.exec(line))) {
       const args = m[2] ? JSON.parse(m[2]) : {};
-      out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't' + Date.now(), name: 'mcp__bullpen__' + m[1], input: args }] } });
+      out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't' + Date.now(), name: 'mcp__posse__' + m[1], input: args }] } });
       const r = await mcp.rpc('tools/call', { name: m[1], arguments: args });
       const text = r.result.content[0].text;
       notes.push(m[1] + ' -> ' + (r.result.isError ? 'ERROR ' : '') + text);
@@ -115,7 +115,7 @@ async function main() {
       out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p' + Date.now(), name: m[1], input: toolInput }] } });
       const pt = opt('--permission-prompt-tool');
       if (!pt) { notes.push('perm ' + m[1] + ' -> denied (no prompt tool)'); continue; }
-      const r = await mcp.rpc('tools/call', { name: pt.replace(/^mcp__bullpen__/, ''), arguments: { tool_name: m[1], input: toolInput, tool_use_id: 'x' } });
+      const r = await mcp.rpc('tools/call', { name: pt.replace(/^mcp__posse__/, ''), arguments: { tool_name: m[1], input: toolInput, tool_use_id: 'x' } });
       const decision = JSON.parse(r.result.content[0].text);
       notes.push('perm ' + m[1] + ' -> ' + decision.behavior);
     } else if ((m = /^@@touch\s+(.+)$/.exec(line))) {

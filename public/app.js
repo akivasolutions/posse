@@ -13,7 +13,7 @@
     ask: ['Ask me', 'Reads its own working folder freely. Edits, commands, web pages and files elsewhere show you an approval card first.'],
     edits: ['Auto-edit', 'Edits files in its folder without asking. Commands still need your approval.'],
     auto: ['Auto-review', 'Claude Code\'s safety classifier approves routine actions and blocks risky ones (needs a recent Claude Code).'],
-    readonly: ['Read only', 'Can read, search and use Bullpen tools. Never edits files or runs commands.'],
+    readonly: ['Read only', 'Can read, search and use Posse tools. Never edits files or runs commands.'],
     full: ['Full access', 'Runs anything without asking. Only for bots you trust in folders you can afford to lose.'],
   };
   // Starting points for new bots. Everything stays editable.
@@ -48,7 +48,7 @@
   // ---------------- access key ----------------
   // The key lives in this origin's localStorage (other ports on 127.0.0.1 can't read it) and goes
   // out as a header. Links the browser loads on its own carry a read-only view token instead.
-  const KEY_STORE = 'bullpen.key';
+  const KEY_STORE = 'posse.key';
   let KEY = '';
   let VT = '';
   try { KEY = localStorage.getItem(KEY_STORE) || ''; } catch {}
@@ -76,7 +76,7 @@
   });
   // Another tab made a new key: adopt it.
   window.addEventListener('storage', (e) => { if (e.key === KEY_STORE && e.newValue && e.newValue !== KEY) location.reload(); });
-  const authH = () => ({ Authorization: 'Bearer ' + KEY, 'X-Bullpen': '1' });
+  const authH = () => ({ Authorization: 'Bearer ' + KEY, 'X-Posse': '1' });
   const vt = (url) => url + (url.includes('?') ? '&' : '?') + 'vt=' + encodeURIComponent(VT);
   // Exports and backups need the key itself, so they are fetched (with the header) and saved from memory.
   // Exports and backups: ask for a one-time ticket with the key, then let the browser download
@@ -95,8 +95,8 @@
 
   function signIn(msg) {
     if (V.sse) { V.sse.close(); V.sse = null; }
-    document.body.innerHTML = '<div class="signin"><form id="signin"><div class="brand"><span class="brand-mark">B</span>Bullpen</div>' +
-      '<p>Enter your access key. It\'s printed in the window where Bullpen is running and saved in <code>secret.json</code> in its data folder.</p>' +
+    document.body.innerHTML = '<div class="signin"><form id="signin"><div class="brand"><span class="brand-mark">P</span>Posse</div>' +
+      '<p>Enter your access key. It\'s printed in the window where Posse is running and saved in <code>secret.json</code> in its data folder.</p>' +
       (msg ? '<p class="err">' + esc(msg) + '</p>' : '') +
       '<input type="password" id="signin-key" autocomplete="current-password" placeholder="Access key" autofocus><button class="btn primary">Sign in</button></form></div>';
     document.getElementById('signin').addEventListener('submit', async (e) => {
@@ -174,7 +174,7 @@
     const s = b.status || {};
     if (s.state === 'working') return s.activity || 'Working…';
     if (s.state === 'waiting') return s.activity || 'Waiting for your approval';
-    if (s.state === 'queued') return s.queued + ' waiting' + (s.why ? ' (' + s.why + ')' : '') + (S.config.paused ? ' — Bullpen is paused' : '');
+    if (s.state === 'queued') return s.queued + ' waiting' + (s.why ? ' (' + s.why + ')' : '') + (S.config.paused ? ' — Posse is paused' : '');
     if (s.state === 'paused') return 'Paused';
     return b.title || 'Idle';
   }
@@ -186,7 +186,7 @@
     else delete document.documentElement.dataset.theme;
     document.documentElement.style.setProperty('--accent', c.accent || '#4f6bed');
     const unread = S.bots.reduce((n, b) => n + (b.unread || 0), 0) + S.rooms.reduce((n, r) => n + (r.unread || 0), 0);
-    document.title = (unread ? '(' + unread + ') ' : '') + 'Bullpen';
+    document.title = (unread ? '(' + unread + ') ' : '') + 'Posse';
   }
 
   // ---------------- routing ----------------
@@ -236,7 +236,7 @@
       botAv(b, '', true) + '<span class="name">' + esc(b.name) + '</span>' + (b.primary ? '<span class="star" title="Primary bot">★</span>' : '') +
       (b.unread ? '<span class="badge">' + b.unread + '</span>' : '') + '</div>';
     const needs = S.pendingCount || 0;
-    let html = '<div class="side-head"><div class="brand"><span class="brand-mark">B</span>Bullpen</div>' +
+    let html = '<div class="side-head"><div class="brand"><span class="brand-mark">P</span>Posse</div>' +
       '<button class="icon-btn' + (S.config.paused ? ' on' : '') + '" data-act="pause" title="' + (S.config.paused ? 'Resume all bots' : 'Pause all bots') + '">' + (S.config.paused ? '▶' : '⏸') + '</button>' +
       '<button class="icon-btn" data-act="new-bot" title="New bot">＋</button></div>' +
       '<button class="search-btn" data-act="palette">Search or jump to… <kbd>' + (navigator.platform.includes('Mac') ? '⌘K' : 'Ctrl K') + '</kbd></button>' +
@@ -653,7 +653,7 @@
       '<button class="btn primary sm" data-c="send">Send</button></div></div><input type="file" id="file-in" multiple hidden>';
     V.pending = [];
     const ta = $('#input');
-    const draftKey = 'bullpen.draft.' + V.ch;
+    const draftKey = 'posse.draft.' + V.ch;
     try { ta.value = localStorage.getItem(draftKey) || ''; } catch {}
     autosize(ta);
     ta.addEventListener('input', () => { autosize(ta); try { localStorage.setItem(draftKey, ta.value); } catch {} mentionPop(ta); });
@@ -698,7 +698,7 @@
     const ch = V.ch;
     ta.value = '';
     autosize(ta);
-    try { localStorage.removeItem('bullpen.draft.' + ch); } catch {}
+    try { localStorage.removeItem('posse.draft.' + ch); } catch {}
     V.pending = [];
     renderPending();
     askNotify();
@@ -1028,7 +1028,7 @@
         '<label class="field inline"><input type="checkbox" name="trustFolderSettings"' + (b.trustFolderSettings ? ' checked' : '') + '><span>Trust this folder\'s Claude Code settings</span></label>' +
         '<small style="display:block;color:var(--muted);margin:-8px 0 12px">Off (recommended): permission rules saved inside the working folder (.claude/settings*.json) are ignored, so a folder can\'t pre-approve commands. Turn on only for folders you control. Either way, bots\' file tools can never change Claude Code settings files (shell commands still need your approval, unless the bot has Full access); with this on, they may edit a project\'s .claude commands, agents and skills, with your approval.</small>' +
         '<label class="field inline"><input type="checkbox" name="useMyClaudeSettings"' + (b.useMyClaudeSettings ? ' checked' : '') + '><span>Use my Claude Code settings and connectors</span></label>' +
-        '<small style="display:block;color:var(--muted);margin:-8px 0 12px">Off (recommended): the bot gets only Bullpen tools plus the servers below, and your personal allow-rules don\'t apply to it. On: it also loads all your settings and every MCP connector you have set up.</small>' +
+        '<small style="display:block;color:var(--muted);margin:-8px 0 12px">Off (recommended): the bot gets only Posse tools plus the servers below, and your personal allow-rules don\'t apply to it. On: it also loads all your settings and every MCP connector you have set up.</small>' +
         field('Extra MCP servers (JSON)', '<textarea name="mcpServers" rows="5" style="font-family:var(--mono);font-size:12px" placeholder=\'{"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]}}\'>' + esc(Object.keys(b.mcpServers || {}).length ? JSON.stringify(b.mcpServers, null, 2) : '') + '</textarea>', 'Connectors for this bot only, in Claude Code\'s mcpServers format.') +
         '</div></details>' +
       '</div>' +
@@ -1141,7 +1141,7 @@
       '<div data-s="interval">' + field('Every (minutes)', '<input type="number" name="minutes" min="15" value="' + esc(s.minutes || 60) + '">', 'At least 15.') + '</div>' +
       '<div data-s="once">' + field('Date and time', '<input type="datetime-local" name="at" value="' + esc(at) + '">') + '</div>' +
       '<div data-s="folder">' + field('Folder', '<input type="text" name="path" value="' + esc(s.path || '') + '" placeholder="e.g. C:\\Clients\\Acme\\Inbox" style="font-family:var(--mono)">', 'Runs about 20 seconds after files stop changing, with the list of changed files. At most every 2 minutes, 40 times a day. Changes the bot makes itself during the run are ignored.') + '</div>' +
-      '<div data-s="webhook"><div class="note">After saving, the Routines page shows this routine\'s webhook URL. Anything POSTed to it is handed to the bot as the event payload. It only listens on this computer unless you start Bullpen with --host.</div></div>' +
+      '<div data-s="webhook"><div class="note">After saving, the Routines page shows this routine\'s webhook URL. Anything POSTed to it is handed to the bot as the event payload. It only listens on this computer unless you start Posse with --host.</div></div>' +
       '</div><div class="modal-foot"><span class="grow"></span><button class="btn" data-m="x">Cancel</button><button class="btn primary" data-m="ok">' + (isNew ? 'Create' : 'Save') + '</button></div>');
     const sync = () => { const t = m.querySelector('[name=type]').value; $$('[data-s]', m).forEach((d) => d.classList.toggle('hidden', d.dataset.s !== t)); };
     sync();
@@ -1208,7 +1208,7 @@
         '<div class="cols">' + field('Default model', '<input type="text" name="defaultModel" value="' + esc(c.defaultModel) + '" list="model-list"><datalist id="model-list"><option value="opus"><option value="sonnet"><option value="haiku"><option value="fable"></datalist>', 'An alias (opus, sonnet, haiku, fable) or a full model id.') +
         field('Default permissions', '<select name="defaultPermission">' + opts(Object.entries(PERMS).map(([k, v]) => [k, v[0]]), c.defaultPermission) + '</select>') + '</div>' +
         '<label class="field inline"><input type="checkbox" name="lowPriority"' + (c.lowPriority !== false ? ' checked' : '') + '><span>Run bots at low priority (keeps the computer responsive while they work)</span></label>' +
-        field('Tool connection', '<select name="mcpTransport">' + opts([['http', 'Built in (lighter, recommended)'], ['stdio', 'Separate helper process (compatibility)']], c.mcpTransport) + '</select>', 'How bots reach Bullpen\'s tools. Switch only if an older Claude Code can\'t connect.') +
+        field('Tool connection', '<select name="mcpTransport">' + opts([['http', 'Built in (lighter, recommended)'], ['stdio', 'Separate helper process (compatibility)']], c.mcpTransport) + '</select>', 'How bots reach Posse\'s tools. Switch only if an older Claude Code can\'t connect.') +
       '</div>' +
       '<div data-pane="limits" class="hidden"><div class="note">Bots that talk to bots can loop. These limits keep usage in check. A bot that fails 3 turns in a row is paused.</div><div class="cols">' +
         lim('maxConcurrent', 'Bots working at once', 'Each bot still runs one turn at a time.', 1, 8) +
@@ -1229,10 +1229,10 @@
         '<small>Anyone with this key (or the sign-in link) can use your bots. A new key signs out every other browser.</small></div>' +
         '<div class="field"><span>Recent security events</span><div id="sec-audit" style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px;font-size:12.5px"><div style="padding:8px;color:var(--muted)">Loading…</div></div></div>' +
       '</div>' +
-      '<div data-pane="about" class="hidden"><p><b>Bullpen</b> — a local team of persistent AI bots, powered by the Claude Code CLI. Open source, MIT license.</p>' +
+      '<div data-pane="about" class="hidden"><p><b>Posse</b> — a local team of persistent AI bots, powered by the Claude Code CLI. Open source, MIT license.</p>' +
         '<dl class="kv"><dt>Version</dt><dd>' + esc(S.version || '') + (S.build ? ' · ' + esc(S.build) : '') + '</dd><dt>Data folder</dt><dd style="font:12px var(--mono)">' + esc(S.dataDir) + '</dd><dt>Today</dt><dd>' + (S.usage.today.turns || 0) + ' turns · $' + (S.usage.today.costUsd || 0).toFixed(2) + ' API-equivalent</dd></dl>' +
         '<p><button class="btn sm" data-m="backup">⤓ Download backup (.tar.gz)</button></p>' +
-        '<p style="color:var(--muted);font-size:12.5px">To update: in the Bullpen folder, double-click <b>update.cmd</b> (Windows) or <b>update.command</b> (macOS), or run <code>node update.js</code>. Your bots, chats and settings are kept.</p>' +
+        '<p style="color:var(--muted);font-size:12.5px">To update: in the Posse folder, double-click <b>update.cmd</b> (Windows) or <b>update.command</b> (macOS), or run <code>node update.js</code>. Your bots, chats and settings are kept.</p>' +
         '<p style="color:var(--muted);font-size:12.5px">Everything (chats, memory, pages, routines) is plain files in the data folder. Back it up like any folder. Keyboard: ⌘/Ctrl+K search · ⌘/Ctrl+Shift+I details · ⌘/Ctrl+, settings.</p></div>' +
       '</div><div class="modal-foot"><span class="grow"></span><button class="btn" data-m="x">Close</button><button class="btn primary" data-m="save">Save</button></div>', { wide: true });
     let sec = null;
@@ -1257,7 +1257,7 @@
       else if (a.dataset.m === 'show-key') { const k = $('#sec-key'); k.type = k.type === 'password' ? 'text' : 'password'; a.textContent = k.type === 'password' ? 'Show' : 'Hide'; }
       else if (a.dataset.m === 'copy-link' && sec) { try { await navigator.clipboard.writeText(sec.openUrl); toast('Sign-in link copied'); } catch { toast('Copy failed', true); } }
       else if (a.dataset.m === 'rotate') {
-        if (!(await confirmBox('Make a new access key?', 'Every other browser using Bullpen is signed out and needs the new key. This browser stays signed in.', 'New key'))) return;
+        if (!(await confirmBox('Make a new access key?', 'Every other browser using Posse is signed out and needs the new key. This browser stays signed in.', 'New key'))) return;
         const r = await attempt(() => api('POST', '/api/security/rotate-key'));
         if (r) {
           KEY = r.accessKey; VT = r.vt;
@@ -1352,7 +1352,7 @@
     if (b && !b.notify) return;
     if (msg.meta && msg.meta.quiet) return;
     const room = ch.startsWith('room:') ? roomById(ch.slice(5)) : null;
-    const title = (b ? b.name : 'Bullpen') + (room ? ' in ' + room.name : '');
+    const title = (b ? b.name : 'Posse') + (room ? ' in ' + room.name : '');
     const body = msg.kind === 'card' ? ({ question: 'Has a question for you', approval: 'Needs your approval', draft: 'Drafted a message', page: 'Saved a page', routine: 'Proposed a routine' }[msg.card.type] || 'Sent a card') : (msg.text || '').slice(0, 180);
     try { const n = new Notification(title, { body, tag: ch }); n.onclick = () => { window.focus(); go(ch); n.close(); }; } catch {}
   }
@@ -1463,11 +1463,11 @@
   (async function boot() {
     if (pendingLinkKey !== null) {
       if (await keyWorks(pendingLinkKey)) { KEY = pendingLinkKey; try { localStorage.setItem(KEY_STORE, KEY); } catch {} }
-      else if (!KEY) return signIn('That sign-in link is not valid. The key may have been changed; check the Bullpen window.');
+      else if (!KEY) return signIn('That sign-in link is not valid. The key may have been changed; check the Posse window.');
       else setTimeout(() => toast('That sign-in link is not valid; you are still signed in.', true), 500);
     }
     if (!KEY) return signIn('');
-    try { await refreshState(); } catch (e) { if (KEY && e.message !== 'Sign in required') document.body.innerHTML = '<div class="empty"><h3>Can\'t reach Bullpen</h3><p>' + esc(e.message) + '</p></div>'; return; }
+    try { await refreshState(); } catch (e) { if (KEY && e.message !== 'Sign in required') document.body.innerHTML = '<div class="empty"><h3>Can\'t reach Posse</h3><p>' + esc(e.message) + '</p></div>'; return; }
     // Day rollover: yesterday's links stay valid for another day, so just reconnect the live stream
     // now and pick up fresh links the next time the user switches chats.
     setInterval(() => {

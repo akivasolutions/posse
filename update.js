@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 'use strict';
-// Bullpen updater. Gets the latest version, keeps your data, then starts Bullpen.
-//   node update.js              update, then start Bullpen (what update.cmd / update.command run)
+// Posse updater. Gets the latest version, keeps your data, then starts Posse.
+//   node update.js              update, then start Posse (what update.cmd / update.command run)
 //   node update.js --no-start   update only
 //   node update.js --check      only say whether an update is available
 // A git checkout updates with git. Otherwise the latest code is downloaded from the project's
-// GitHub page (the "repository" in package.json), or from BULLPEN_UPDATE_URL (a .tar.gz).
-// Your bots, chats and settings live in the data folder (~/.bullpen), which an update never touches.
+// GitHub page (the "repository" in package.json), or from POSSE_UPDATE_URL (a .tar.gz).
+// Your bots, chats and settings live in the data folder (~/.posse), which an update never touches.
 // Only Node's built-in modules are used, so this works even if the rest of the folder is damaged.
 const fs = require('fs');
 const os = require('os');
@@ -23,9 +23,9 @@ const MAX_UNPACKED = 200 * 1024 * 1024;
 const MAX_FILES = 5000;
 // Top-level names an update never replaces or removes.
 // Compared without case: Windows and macOS treat ".Git" and ".git" as the same folder.
-const KEEP = new Set(['.git', '.update', '.bullpen-version', 'data', 'node', 'node_modules']);
+const KEEP = new Set(['.git', '.update', '.posse-version', 'data', 'node', 'node_modules']);
 const kept = (top) => KEEP.has(String(top).toLowerCase());
-// A download must contain these to count as Bullpen.
+// A download must contain these to count as Posse.
 const REQUIRED = ['package.json', 'server.js', 'update.js', 'lib/app.js', 'public/index.html'];
 
 const say = (s = '') => console.log('  ' + s);
@@ -40,11 +40,11 @@ function argVal(argv, name, env) {
   return (env && process.env[env]) || '';
 }
 
-// Same rules as server.js: --data, BULLPEN_DATA, else ~/.bullpen (or ./data from versions before 0.2).
+// Same rules as server.js: --data, POSSE_DATA, else ~/.posse (or ./data from versions before 0.2).
 function dataDir(app, argv) {
-  const d = argVal(argv, 'data', 'BULLPEN_DATA');
+  const d = argVal(argv, 'data', 'POSSE_DATA');
   if (d) return path.resolve(d);
-  const home = path.join(os.homedir(), '.bullpen');
+  const home = path.join(os.homedir(), '.posse');
   const old = path.join(app, 'data');
   return !fs.existsSync(path.join(home, 'config.json')) && fs.existsSync(path.join(old, 'config.json')) ? old : home;
 }
@@ -98,8 +98,8 @@ function untar(buf) {
   return { entries, commit };
 }
 
-// Paths inside the archive, minus its top folder ("bullpen-main/"). Anything that could land
-// outside the Bullpen folder, or that Windows treats specially, rejects the whole download.
+// Paths inside the archive, minus its top folder ("posse-main/"). Anything that could land
+// outside the Posse folder, or that Windows treats specially, rejects the whole download.
 function cleanPaths(entries) {
   let top = null;
   const files = [];
@@ -123,12 +123,12 @@ function cleanPaths(entries) {
   return files;
 }
 
-function checkBullpen(files) {
+function checkPosse(files) {
   const have = new Map(files.map((f) => [f.rel, f]));
-  for (const r of REQUIRED) if (!have.has(r)) throw new Error('The download is not Bullpen (no ' + r + ').');
+  for (const r of REQUIRED) if (!have.has(r)) throw new Error('The download is not Posse (no ' + r + ').');
   let pkg;
-  try { pkg = JSON.parse(have.get('package.json').data.toString('utf8')); } catch { throw new Error('The download is not Bullpen (bad package.json).'); }
-  if (pkg.name !== 'bullpen') throw new Error('The download is not Bullpen (package name "' + pkg.name + '").');
+  try { pkg = JSON.parse(have.get('package.json').data.toString('utf8')); } catch { throw new Error('The download is not Posse (bad package.json).'); }
+  if (pkg.name !== 'posse') throw new Error('The download is not Posse (package name "' + pkg.name + '").');
   return pkg;
 }
 
@@ -137,18 +137,18 @@ function readArchive(gz) {
   try { tar = zlib.gunzipSync(gz, { maxOutputLength: MAX_UNPACKED }); } catch (e) { throw new Error('The download is damaged or too large (' + e.message + ').'); }
   const { entries, commit } = untar(tar);
   const files = cleanPaths(entries).filter((f) => !kept(f.rel.split('/')[0]));
-  const pkg = checkBullpen(files);
+  const pkg = checkPosse(files);
   return { files, commit, pkg };
 }
 
 // ---------------- downloading ----------------
 
 function source(app, argv) {
-  const from = argVal(argv, 'from', 'BULLPEN_UPDATE_URL');
+  const from = argVal(argv, 'from', 'POSSE_UPDATE_URL');
   if (from) return from;
   const pkg = readJSON(path.join(app, 'package.json')) || {};
   const repo = String((pkg.repository && (pkg.repository.url || pkg.repository)) || '').replace(/^git\+/, '').replace(/\.git$/, '').replace(/\/+$/, '');
-  if (!/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('No update source. Set BULLPEN_UPDATE_URL to the address of a .tar.gz of the latest version.');
+  if (!/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('No update source. Set POSSE_UPDATE_URL to the address of a .tar.gz of the latest version.');
   return repo + '/archive/refs/heads/main.tar.gz';
 }
 
@@ -157,7 +157,7 @@ function fetchNode(url, allowHttp, redirects = 5) {
     let u;
     try { u = new URL(url); } catch { return reject(new Error('Bad update address: ' + url)); }
     if (u.protocol !== 'https:' && !(allowHttp && u.protocol === 'http:')) return reject(new Error('Refusing to download over ' + u.protocol + ' (use https).'));
-    const req = (u.protocol === 'https:' ? https : http).get(u, { headers: { 'user-agent': 'bullpen-updater' }, timeout: 30000 }, (res) => {
+    const req = (u.protocol === 'https:' ? https : http).get(u, { headers: { 'user-agent': 'posse-updater' }, timeout: 30000 }, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         res.resume();
         if (!redirects) return reject(new Error('Too many redirects.'));
@@ -178,7 +178,7 @@ function fetchNode(url, allowHttp, redirects = 5) {
 // Work networks often inspect HTTPS with their own certificate, which Node doesn't know but
 // Windows and curl do. If Node can't download, try curl (built into Windows 10 and macOS).
 function fetchCurl(url, allowHttp) {
-  const tmp = path.join(os.tmpdir(), 'bullpen-update-' + crypto.randomBytes(6).toString('hex') + '.tar.gz');
+  const tmp = path.join(os.tmpdir(), 'posse-update-' + crypto.randomBytes(6).toString('hex') + '.tar.gz');
   try {
     execFileSync(process.platform === 'win32' ? 'curl.exe' : 'curl', ['-fsSL', '--max-redirs', '5', '--max-filesize', String(MAX_DOWNLOAD), '--proto', allowHttp ? '=http,https' : '=https', '--proto-redir', allowHttp ? '=http,https' : '=https', '-o', tmp, url], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 120000 });
     return fs.readFileSync(tmp);
@@ -194,7 +194,7 @@ async function download(url) {
   }
 }
 
-// ---------------- the running Bullpen ----------------
+// ---------------- the running Posse ----------------
 
 function request(port, method, p, body) {
   return new Promise((resolve) => {
@@ -219,12 +219,12 @@ function listening(port) {
   });
 }
 
-// The Bullpen using this data folder, if one is running. It must prove it knows the access key,
+// The Posse using this data folder, if one is running. It must prove it knows the access key,
 // and the key itself is never sent, so whatever else might be on the port learns nothing.
 async function findRunning(data, argv) {
   const key = (readJSON(path.join(data, 'secret.json')) || {}).accessKey;
   if (!key) return null;
-  const ports = [(readJSON(path.join(data, 'server.json')) || {}).port, parseInt(argVal(argv, 'port', 'BULLPEN_PORT'), 10), 4747];
+  const ports = [(readJSON(path.join(data, 'server.json')) || {}).port, parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10), 4747];
   for (const port of [...new Set(ports.filter((p) => Number.isInteger(p) && p > 0 && p < 65536))]) {
     const n = crypto.randomBytes(18).toString('base64url');
     const r = await request(port, 'GET', '/api/ping?n=' + n);
@@ -236,19 +236,19 @@ async function findRunning(data, argv) {
 async function stopRunning(data, argv) {
   const run = await findRunning(data, argv);
   if (!run) {
-    const port = parseInt(argVal(argv, 'port', 'BULLPEN_PORT'), 10) || 4747;
-    if (await listening(port)) say('Note: something is using port ' + port + '. If it is an older Bullpen, close its window before it starts again.');
+    const port = parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747;
+    if (await listening(port)) say('Note: something is using port ' + port + '. If it is an older Posse, close its window before it starts again.');
     return false;
   }
-  say('Stopping the running Bullpen (bots that were working pick up again after the restart)…');
+  say('Stopping the running Posse (bots that were working pick up again after the restart)…');
   const t = Date.now();
   const r = await request(run.port, 'POST', '/api/stop', { t, sig: hmac(run.key, 'stop:' + t), reason: 'update' });
-  if (r.status !== 200) throw new Error('Bullpen did not stop (HTTP ' + r.status + '). Close its window, then run the update again.');
+  if (r.status !== 200) throw new Error('Posse did not stop (HTTP ' + r.status + '). Close its window, then run the update again.');
   for (let i = 0; i < 150; i++) {
     if (!(await listening(run.port))) return true;
     await sleep(200);
   }
-  throw new Error('Bullpen is still running. Close its window, then run the update again.');
+  throw new Error('Posse is still running. Close its window, then run the update again.');
 }
 
 // ---------------- installing ----------------
@@ -270,7 +270,7 @@ function changes(app, files) {
     try { return !fs.readFileSync(path.join(app, f.rel)).equals(f.data); } catch { return true; }
   });
   const tops = [...new Set(files.map((f) => f.rel.split('/')[0]))].filter((t) => !kept(t));
-  const before = (readJSON(path.join(app, '.bullpen-version')) || {}).top;
+  const before = (readJSON(path.join(app, '.posse-version')) || {}).top;
   const gone = (Array.isArray(before) ? before : []).filter((t) => typeof t === 'string' && !tops.includes(t) && !kept(t) && !t.includes('/') && !t.includes('\\') && t !== '..' && t !== '.' && fs.existsSync(path.join(app, t)));
   return { changed, tops, gone };
 }
@@ -307,9 +307,9 @@ function install(app, files, commit) {
         else renameRetry(path.join(PREV, t), path.join(app, t));
       } catch {}
     }
-    throw new Error('Could not replace ' + (e.path ? path.basename(e.path) : 'a file') + ' (' + e.code + '). Nothing was changed. Close any program using the Bullpen folder and try again.');
+    throw new Error('Could not replace ' + (e.path ? path.basename(e.path) : 'a file') + ' (' + e.code + '). Nothing was changed. Close any program using the Posse folder and try again.');
   }
-  fs.writeFileSync(path.join(app, '.bullpen-version'), JSON.stringify({ commit: commit || '', top: tops, updatedAt: new Date().toISOString() }, null, 2) + '\n');
+  fs.writeFileSync(path.join(app, '.posse-version'), JSON.stringify({ commit: commit || '', top: tops, updatedAt: new Date().toISOString() }, null, 2) + '\n');
   fs.rmSync(NEW, { recursive: true, force: true });
 }
 
@@ -331,11 +331,11 @@ async function updateGit(app, argv, data) {
   try { upstream = git('rev-parse', '@{u}'); } catch { throw new Error('This git branch has no upstream to update from.'); }
   const head = git('rev-parse', 'HEAD');
   const behind = parseInt(git('rev-list', '--count', 'HEAD..@{u}'), 10) || 0;
-  if (!behind) { say('Bullpen is up to date (' + head.slice(0, 7) + ').'); return false; }
+  if (!behind) { say('Posse is up to date (' + head.slice(0, 7) + ').'); return false; }
   if (argv.includes('--check')) { say('An update is available (' + behind + ' new change' + (behind === 1 ? '' : 's') + ').'); return false; }
   await stopRunning(data, argv);
   try { git('merge', '--ff-only', '--quiet', '@{u}'); } catch (e) {
-    throw new Error('git could not update this folder (local changes?): ' + String(e.stderr || e.message).trim().split('\n').pop() + ' Bullpen was not changed.');
+    throw new Error('git could not update this folder (local changes?): ' + String(e.stderr || e.message).trim().split('\n').pop() + ' Posse was not changed.');
   }
   say('Updated ' + head.slice(0, 7) + ' → ' + upstream.slice(0, 7) + '.');
   return true;
@@ -346,7 +346,7 @@ async function updateGit(app, argv, data) {
 async function main(argv) {
   const app = __dirname;
   const data = dataDir(app, argv);
-  console.log('\n  Bullpen update');
+  console.log('\n  Posse update');
   if (isGitCheckout(app)) {
     await updateGit(app, argv, data);
   } else {
@@ -355,7 +355,7 @@ async function main(argv) {
     const { files, commit, pkg } = readArchive(await download(url));
     const { changed, gone } = changes(app, files);
     if (!changed.length && !gone.length) {
-      say('Bullpen is up to date (' + pkg.version + (commit ? ', ' + commit.slice(0, 7) : '') + ').');
+      say('Posse is up to date (' + pkg.version + (commit ? ', ' + commit.slice(0, 7) : '') + ').');
     } else if (argv.includes('--check')) {
       say('An update is available (' + pkg.version + (commit ? ', ' + commit.slice(0, 7) : '') + ', ' + changed.length + ' changed file' + (changed.length === 1 ? '' : 's') + ').');
     } else {
@@ -380,4 +380,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { untar, cleanPaths, checkBullpen, readArchive, changes, install, findRunning, stopRunning, dataDir, source };
+module.exports = { untar, cleanPaths, checkPosse, readArchive, changes, install, findRunning, stopRunning, dataDir, source };

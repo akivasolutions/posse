@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// Bullpen — a local team of persistent AI bots powered by the Claude Code CLI.
+// Posse — a local team of persistent AI bots powered by the Claude Code CLI.
 // Usage: node server.js [--port 4747] [--data ./data] [--host 127.0.0.1] [--open]
 const fs = require('fs');
 const os = require('os');
@@ -14,15 +14,15 @@ const pkg = require('./package.json');
 function arg(name, dflt) {
   const i = process.argv.indexOf('--' + name);
   if (i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--')) return process.argv[i + 1];
-  return process.env['BULLPEN_' + name.toUpperCase()] || dflt;
+  return process.env['POSSE_' + name.toUpperCase()] || dflt;
 }
 
 const PORT = parseInt(arg('port', '4747'), 10);
 const HOST = arg('host', '127.0.0.1');
-// Default data folder is per-user (~/.bullpen), so other accounts on a shared machine can't read it.
+// Default data folder is per-user (~/.posse), so other accounts on a shared machine can't read it.
 // Versions before 0.2 kept it in ./data next to server.js; keep using that one if it's there.
 function defaultData() {
-  const home = path.join(os.homedir(), '.bullpen');
+  const home = path.join(os.homedir(), '.posse');
   const old = path.join(__dirname, 'data');
   if (!fs.existsSync(path.join(home, 'config.json')) && fs.existsSync(path.join(old, 'config.json'))) {
     console.log('  Using the existing data folder ' + old + ' (new installs use ' + home + '; move it there whenever you like).');
@@ -34,7 +34,7 @@ const DATA = path.resolve(arg('data', '') || defaultData());
 const PUBLIC = path.join(__dirname, 'public');
 // Which build this is: the commit the updater installed, or a git checkout's commit.
 function readBuild() {
-  try { const v = JSON.parse(fs.readFileSync(path.join(__dirname, '.bullpen-version'), 'utf8')); if (/^[0-9a-f]{7,64}$/.test(v.commit)) return v.commit; } catch {}
+  try { const v = JSON.parse(fs.readFileSync(path.join(__dirname, '.posse-version'), 'utf8')); if (/^[0-9a-f]{7,64}$/.test(v.commit)) return v.commit; } catch {}
   try {
     const g = path.join(__dirname, '.git');
     let head = fs.readFileSync(path.join(g, 'HEAD'), 'utf8').trim();
@@ -61,7 +61,7 @@ const MIME = {
 const app = new App({ dataDir: DATA, baseUrl: BASE });
 
 // ---------------- access key ----------------
-// Bullpen listens on loopback, but on a shared machine other accounts can reach loopback too, and
+// Posse listens on loopback, but on a shared machine other accounts can reach loopback too, and
 // cookies are shared across every port on 127.0.0.1. So there is no cookie: the browser keeps the
 // access key in localStorage (scoped to this exact origin, port included) and sends it as an
 // "Authorization: Bearer" header. Things a browser loads without headers (the live event stream,
@@ -185,12 +185,12 @@ function serveStatic(res, file) {
   });
 }
 
-// Bot-made pages run scripts but can't reach the network, Bullpen's API, navigate away, open
+// Bot-made pages run scripts but can't reach the network, Posse's API, navigate away, open
 // windows or submit forms, so a page can't carry data out even if a bot was misled.
 const PAGE_CSP = "sandbox allow-scripts allow-modals allow-downloads; default-src 'none'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src data: blob: 'self'; font-src data:; media-src data: blob:; form-action 'none'; frame-ancestors 'self'; base-uri 'none'";
 
 // Markdown pages are rendered by the same in-house renderer, inlined: a sandboxed page has no
-// origin of its own, so it can't load anything from Bullpen.
+// origin of its own, so it can't load anything from Posse.
 let pageAssets = null;
 function pageShell(title, markdown) {
   if (!pageAssets) pageAssets = { css: fs.readFileSync(path.join(PUBLIC, 'page.css'), 'utf8'), js: fs.readFileSync(path.join(PUBLIC, 'md.js'), 'utf8') };
@@ -303,26 +303,26 @@ route('PATCH', '/api/config', async (req) => ({ config: app.updateConfig(await j
 // streamed file by file so even a large folder doesn't use much memory.
 route('GET', '/api/backup', async (req, res) => {
   const stamp = new Date().toISOString().slice(0, 10);
-  res.writeHead(200, { 'content-type': 'application/gzip', 'content-disposition': 'attachment; filename="bullpen-backup-' + stamp + '.tar.gz"', 'cache-control': 'no-store', ...SEC_HEADERS });
+  res.writeHead(200, { 'content-type': 'application/gzip', 'content-disposition': 'attachment; filename="posse-backup-' + stamp + '.tar.gz"', 'cache-control': 'no-store', ...SEC_HEADERS });
   try {
     await require('./lib/backup').streamBackup(app.store.dir, res, new Set(['secret.json', 'run', 'trash']));
     app.audit('backup', { detail: 'downloaded' });
   } catch (e) {
     if (e.message === 'cancelled') return undefined; // the user closed the download
-    console.error('[bullpen] backup failed:', e.message);
+    console.error('[posse] backup failed:', e.message);
     app.audit('backup', { detail: 'failed: ' + e.message });
   }
   return undefined;
 });
 route('GET', '/api/whoami', () => ({ ok: true, vt: viewToken() }));
-// "Is this my Bullpen?" for the start and update scripts: answers a fresh challenge with a proof
+// "Is this my Posse?" for the start and update scripts: answers a fresh challenge with a proof
 // of the access key (never the key itself).
 route('GET', '/api/ping', (req, res, p, url) => {
   const n = String(url.searchParams.get('n') || '');
   if (!/^[\w-]{16,64}$/.test(n)) throw httpError(400, 'Bad challenge');
-  return { bullpen: true, proof: proof('ping:' + n) };
+  return { posse: true, proof: proof('ping:' + n) };
 }, { open: true });
-// The update script stops Bullpen with a signed request that is good for one minute, once.
+// The update script stops Posse with a signed request that is good for one minute, once.
 const usedStops = new Set();
 route('POST', '/api/stop', async (req) => {
   const b = (await json(req, 4096)) || {};
@@ -333,7 +333,7 @@ route('POST', '/api/stop', async (req) => {
   }
   usedStops.add(t);
   app.audit('stopped', { detail: b.reason === 'update' ? 'for an update' : 'on request' });
-  console.log('\n  Bullpen is stopping' + (b.reason === 'update' ? ' for an update; it starts again in the update window.' : '.') + '\n');
+  console.log('\n  Posse is stopping' + (b.reason === 'update' ? ' for an update; it starts again in the update window.' : '.') + '\n');
   setTimeout(shutdown, 50);
   return { ok: true };
 }, { open: true });
@@ -393,13 +393,13 @@ route('POST', '/api/hooks/:id/:secret', async (req, res, p) => {
 
 // Called by lib/mcp-server.js on behalf of a running bot turn.
 route('POST', '/api/mcp/call', async (req) => {
-  const run = app.runner.byToken.get(String(req.headers['x-bullpen-run'] || ''));
-  if (!run) return { isError: true, text: 'This turn has ended; Bullpen tools are unavailable.' };
+  const run = app.runner.byToken.get(String(req.headers['x-posse-run'] || ''));
+  if (!run) return { isError: true, text: 'This turn has ended; Posse tools are unavailable.' };
   const b = await json(req, 8e6);
   try { return await callTool(app, run, String(b.tool || ''), b.args || {}); } catch (e) { return { isError: true, text: e.message }; }
 }, { open: true });
 
-// Bullpen's tools over MCP "Streamable HTTP", answered with plain JSON. Claude Code connects to
+// Posse's tools over MCP "Streamable HTTP", answered with plain JSON. Claude Code connects to
 // this directly, so a bot turn needs no extra helper process. Auth: the per-turn bearer token.
 const { TOOLS } = require('./lib/tools-def');
 const MCP_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
@@ -433,7 +433,7 @@ async function handleMcp(req, res) {
     switch (m.method) {
       case 'initialize': {
         const asked = m.params && m.params.protocolVersion;
-        return reply({ protocolVersion: MCP_VERSIONS.includes(asked) ? asked : MCP_VERSIONS[1], capabilities: { tools: {} }, serverInfo: { name: 'bullpen', version: pkg.version } });
+        return reply({ protocolVersion: MCP_VERSIONS.includes(asked) ? asked : MCP_VERSIONS[1], capabilities: { tools: {} }, serverInfo: { name: 'posse', version: pkg.version } });
       }
       case 'ping': return reply({});
       case 'tools/list': return reply({ tools: TOOLS });
@@ -454,7 +454,7 @@ async function handleMcp(req, res) {
 // ---------------- server ----------------
 const server = http.createServer((req, res) => {
   handle(req, res).catch((e) => {
-    if (!(e instanceof URIError) && !e.status) console.error('[bullpen]', req.method, String(req.url).split('?')[0], e);
+    if (!(e instanceof URIError) && !e.status) console.error('[posse]', req.method, String(req.url).split('?')[0], e);
     if (!res.headersSent) send(res, e instanceof URIError ? 400 : e.status || 500, { error: e instanceof URIError ? 'Bad request' : e.message || 'Server error' });
     else res.end();
   });
@@ -495,7 +495,7 @@ async function handle(req, res) {
   if (!isStatic && !openRoute && !keyOk(req) && !eventsWithView && !resourceWithToken && !download) {
     authFailed();
     if (pathname.startsWith('/api/')) return send(res, 401, { error: 'Sign in required' });
-    return send(res, 401, 'Sign in required. Open Bullpen from its sign-in link.');
+    return send(res, 401, 'Sign in required. Open Posse from its sign-in link.');
   }
 
   if (pathname.startsWith('/api/')) {
@@ -505,14 +505,14 @@ async function handle(req, res) {
       if (!m) continue;
       // Browsers can't add custom headers cross-origin without a CORS preflight we never grant,
       // so requiring one on every write blocks other websites from driving the API.
-      if (req.method !== 'GET' && !r.open && req.headers['x-bullpen'] !== '1') return send(res, 403, { error: 'Missing X-Bullpen header' });
+      if (req.method !== 'GET' && !r.open && req.headers['x-posse'] !== '1') return send(res, 403, { error: 'Missing X-Posse header' });
       const params = {};
       r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
       try {
         const out = await r.handler(req, res, params, url);
         if (out !== undefined && !res.headersSent) send(res, 200, out);
       } catch (e) {
-        if (!e.status) console.error('[bullpen]', req.method, pathname.replace(/^(\/api\/hooks\/[^/]+\/).*/, '$1…'), e);
+        if (!e.status) console.error('[posse]', req.method, pathname.replace(/^(\/api\/hooks\/[^/]+\/).*/, '$1…'), e);
         if (!res.headersSent) send(res, e.status || 500, { error: e.message || 'Server error' });
       }
       return;
@@ -556,7 +556,7 @@ async function handle(req, res) {
   if (fs.existsSync(file) && fs.statSync(file).isFile()) return serveStatic(res, file);
   return serveStatic(res, path.join(PUBLIC, 'index.html'));
 }
-process.on('unhandledRejection', (e) => console.error('[bullpen] unhandled:', e));
+process.on('unhandledRejection', (e) => console.error('[posse] unhandled:', e));
 
 // Approval prompts hold a request open while the user decides.
 server.requestTimeout = 0;
@@ -564,12 +564,12 @@ server.headersTimeout = 60e3;
 server.keepAliveTimeout = 65e3;
 
 server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') console.error('\nPort ' + PORT + ' is in use. Is Bullpen already running? Open ' + BASE + ' or start with --port <another>.\n');
+  if (e.code === 'EADDRINUSE') console.error('\nPort ' + PORT + ' is in use. Is Posse already running? Open ' + BASE + ' or start with --port <another>.\n');
   else console.error(e);
   process.exit(1);
 });
 
-// One Bullpen per data folder. If this folder's Bullpen is already running (on any port), open
+// One Posse per data folder. If this folder's Posse is already running (on any port), open
 // that one instead of starting a second copy, which would fight over the same files.
 function provesKey(port) {
   const n = crypto.randomBytes(18).toString('base64url');
@@ -594,7 +594,7 @@ async function alreadyRunning() {
   const running = await alreadyRunning();
   if (running) {
     const u = 'http://127.0.0.1:' + running + '/#key=' + encodeURIComponent(secret.accessKey);
-    console.log('\n  Bullpen is already running' + (process.argv.includes('--open') ? '; opened it in your browser' : '') + ':\n  ' + u + '\n');
+    console.log('\n  Posse is already running' + (process.argv.includes('--open') ? '; opened it in your browser' : '') + ':\n  ' + u + '\n');
     if (process.argv.includes('--open')) openBrowser(u);
     return;
   }
@@ -606,7 +606,7 @@ function onListening() {
   app.load();
   app.store.writeJSON('server.json', { pid: process.pid, port: PORT, startedAt: Date.now() });
   const info = app.publicState().cli;
-  console.log('\n  Bullpen ' + pkg.version + (BUILD ? ' (' + BUILD.slice(0, 7) + ')' : '') + ' — open this link to sign in:\n  ' + openUrl());
+  console.log('\n  Posse ' + pkg.version + (BUILD ? ' (' + BUILD.slice(0, 7) + ')' : '') + ' — open this link to sign in:\n  ' + openUrl());
   console.log('  Data:   ' + DATA);
   console.log('  Claude: ' + (info.found ? info.version + ' (' + info.path + ')' : 'NOT FOUND — ' + info.error));
   console.log('');

@@ -7,7 +7,7 @@ const path = require('path');
 const { Store, Channels } = require('../lib/store');
 
 function fresh() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bullpen-store-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'posse-store-'));
   const store = new Store(dir);
   return { dir, store, ch: new Channels(store) };
 }

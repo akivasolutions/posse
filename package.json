@@ -1,9 +1,9 @@
 {
-  "name": "bullpen",
+  "name": "posse",
   "version": "0.1.0",
   "description": "A local team of persistent AI bots powered by the Claude Code CLI. One primary bot coordinates specialists that delegate, report back and talk to each other.",
   "main": "server.js",
-  "bin": { "bullpen": "server.js" },
+  "bin": { "posse": "server.js" },
   "scripts": {
     "start": "node server.js",
     "test": "node --test test/unit.test.js test/store.test.js test/e2e.test.js test/lifecycle.test.js test/update.test.js"
@@ -11,7 +11,7 @@
   "engines": { "node": ">=18.17" },
   "keywords": ["claude", "claude-code", "agents", "multi-agent", "bots", "assistant", "local-first"],
   "author": "youngharold",
-  "repository": { "type": "git", "url": "https://github.com/youngharold/bullpen" },
+  "repository": { "type": "git", "url": "https://github.com/youngharold/posse" },
   "license": "MIT",
   "dependencies": {}
 }

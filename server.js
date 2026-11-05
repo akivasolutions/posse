@@ -288,6 +288,7 @@ route('GET', '/api/backup', async (req, res) => {
     await require('./lib/backup').streamBackup(app.store.dir, res, new Set(['secret.json', 'run', 'trash']));
     app.audit('backup', { detail: 'downloaded' });
   } catch (e) {
+    if (e.message === 'cancelled') return undefined; // the user closed the download
     console.error('[bullpen] backup failed:', e.message);
     app.audit('backup', { detail: 'failed: ' + e.message });
   }
@@ -301,6 +302,7 @@ route('POST', '/api/download-ticket', async (req) => {
   const b = await json(req);
   const target = decodeURIComponent(String(b.path || '')); // compared with the decoded request path
   if (target !== '/api/backup' && !/^\/api\/channels\/[^/]+\/export$/.test(target)) throw httpError(400, 'Not downloadable');
+  if (target !== '/api/backup') app.checkChannel(target.split('/')[3]); // 404 now, not a silently failed download
   const t = crypto.randomBytes(24).toString('base64url');
   tickets.set(t, { target, exp: Date.now() + 60e3 });
   for (const [k, v] of tickets) if (v.exp < Date.now()) tickets.delete(k);

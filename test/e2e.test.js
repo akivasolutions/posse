@@ -780,3 +780,38 @@ test('exports keep answered cards; download tickets are single-use; connector se
   assert.ok(!text.includes('sk-very-secret'), 'connector token not on the event stream');
   await T.api('PATCH', '/api/bots/' + chief.id, { mcpServers: {} });
 });
+
+test('approval edge cases: missing fields, big file writes, sensitive folders, deleted bots', async () => {
+  const ops = (await T.api('POST', '/api/bots', { name: 'Ops4', permission: 'edits' })).data.bot;
+  const low = (await T.api('POST', '/api/bots', { name: 'Low4', permission: 'readonly' })).data.bot;
+  const ch = 'dm:' + low.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'go\n@@call delegate_task {"to":"ops4","instructions":"do a thing"}' });
+  const card = await T.waitFor(async () => (await T.msgs(ch)).find((m) => m.kind === 'card' && m.card.type === 'approval' && m.card.status === 'pending'), 15000, 'card without a title');
+  assert.strictEqual(card.card.input.title, 'Task', 'the card shows the title that will be used');
+  await T.api('POST', '/api/channels/' + ch + '/cards/' + card.id, { decision: 'deny' });
+  await idle(low.id);
+  // a big file write gets a card with an honest preview and no "Always allow"
+  const ask = (await T.api('POST', '/api/bots', { name: 'Writer4' })).data.bot;
+  const ach = 'dm:' + ask.id;
+  await T.api('POST', '/api/channels/' + ach + '/messages', { text: 'big\n@@perm Write ' + JSON.stringify({ file_path: '/tmp/big-report.md', content: 'y'.repeat(120000) }) });
+  const big = await T.waitFor(async () => (await T.msgs(ach)).find((m) => m.kind === 'card' && m.card.type === 'approval' && m.card.status === 'pending'), 15000, 'big write card');
+  assert.match(big.card.input.content, /more characters not shown\]$/);
+  assert.strictEqual(big.card.rule, '');
+  await T.api('POST', '/api/channels/' + ach + '/cards/' + big.id, { decision: 'allow' });
+  await T.waitFor(async () => { const l = lastBot(await T.msgs(ach)); return l && /perm Write -> allow/.test(l.text); }, 15000, 'write allowed');
+  await idle(ask.id);
+  // the data folder is never offered as an "Always allow" folder
+  const { suggestRule, setSensitive } = require('../lib/app');
+  setSensitive(path.join(T.tmp, 'data')); // as the server does at start
+  assert.strictEqual(suggestRule('Edit', { file_path: path.join(T.tmp, 'data', 'bots', 'b_x', 'bot.json') }), '');
+  assert.strictEqual(suggestRule('Edit', { file_path: fs.realpathSync(path.join(T.tmp, 'data')) + '/bots/b_x/bot.json' }), '', 'real spelling too');
+  // a question card from a bot that was deleted can't be answered into nowhere
+  await T.api('POST', '/api/channels/' + ach + '/messages', { text: 'ask\n@@call ask_user {"question":"Still there?","options":["Yes"]}' });
+  const q = await T.waitFor(async () => (await T.msgs(ach)).find((m) => m.kind === 'card' && m.card.type === 'question' && m.card.status === 'open'), 15000, 'question');
+  await idle(ask.id);
+  const room = (await T.api('POST', '/api/rooms', { name: 'Gone', members: [ask.id] })).data.room;
+  await T.api('DELETE', '/api/bots/' + ask.id);
+  await T.api('DELETE', '/api/bots/' + low.id); await T.api('DELETE', '/api/bots/' + ops.id);
+  await T.api('DELETE', '/api/rooms/' + room.id);
+  assert.strictEqual((await T.api('POST', '/api/channels/' + ach + '/cards/' + q.id, { choices: ['Yes'] })).status, 404, 'its chat is gone');
+});

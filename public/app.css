@@ -346,3 +346,5 @@ textarea.mem { width: 100%; min-height: 140px; border: 1px solid var(--line-stro
 .tab { white-space: nowrap; flex: none; }
 #sec-audit { overflow-wrap: anywhere; }
 .field.inline > span { min-width: 0; overflow-wrap: anywhere; }
+
+.card pre.input.full { max-height: 70vh; }

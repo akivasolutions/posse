@@ -191,6 +191,7 @@
 
   // ---------------- routing ----------------
   function go(ch, { replace } = {}) {
+    if (V.linksStale) { V.linksStale = false; V.msgs = {}; refreshState().then(() => { if (V.ch === ch) { renderMain(); renderPane(); } }).catch(() => {}); }
     V.ch = ch;
     const h = '#' + ch.replace(':', '/');
     if (location.hash !== h) { if (replace) history.replaceState(null, '', h); else history.pushState(null, '', h); }
@@ -493,8 +494,12 @@
         return h + '</div>';
       }
       case 'approval': {
-        const input = Object.entries(c.input || {}).map(([k, v]) => k + ': ' + v).join('\n');
+        const raw = Object.entries(c.input || {}).map(([k, v]) => k + ': ' + v).join('\n');
+        // Make direction overrides and zero-width characters visible, so text can't be disguised.
+        const input = raw.replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, (ch) => '⟦U+' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') + '⟧');
+        const lines = raw.split('\n').length;
         let h = '<div class="card approval"><h4>' + (c.escalation ? '🛡 ' + esc(c.tool) + '?' : '⚠️ Approve ' + esc(c.tool) + '?') + '</h4>' +
+          '<div class="k">' + lines + ' line' + (lines === 1 ? '' : 's') + ' · ' + raw.length.toLocaleString() + ' characters' + (raw.length > 600 ? ' · <button class="btn sm" data-act="expand">Show all</button>' : '') + '</div>' +
           (c.escalation === 'shared' ? '<div class="k">Every bot reads this, including ones with more permissions than the bot asking. Approve only if you want it saved as shown.</div>'
             : c.escalation ? '<div class="k">That bot has more permissions than the one asking. Approve only if this is exactly what you want done; everything it will receive is shown below.</div>' : '') + '<pre class="input">' + esc(input) + '</pre>';
         if (st === 'pending' || st === 'later') {
@@ -618,6 +623,7 @@
       const text = (c.subject ? 'Subject: ' + c.subject + '\n\n' : '') + c.body;
       try { await navigator.clipboard.writeText(text); toast('Copied'); } catch { toast('Copy failed — select the text instead', true); }
     } else if (act === 'open-page') openPage(a.dataset.id);
+    else if (act === 'expand') { const pre = a.closest('.card').querySelector('pre.input'); pre.classList.toggle('full'); a.textContent = pre.classList.contains('full') ? 'Show less' : 'Show all'; }
     else if (act === 'copy-msg' && m) { try { await navigator.clipboard.writeText(m.text || ''); toast('Copied'); } catch { toast('Copy failed', true); } }
     else if (act === 'remember' && m) { const r = await attempt(() => api('POST', chUrl(ch) + '/messages/' + encodeURIComponent(id) + '/remember')); if (r) toast('Saved to ' + ((botById(r.botId) || {}).name || 'the bot') + '\'s memory'); }
     else if (act === 'retry') attempt(() => api('POST', chUrl(ch) + '/messages/' + encodeURIComponent(id) + '/retry'));
@@ -1024,6 +1030,16 @@
       '</div><div class="modal-foot">' + (isNew ? '' : '<button class="btn danger" data-m="delete">Delete bot…</button>') + '<span class="grow"></span><button class="btn" data-m="x">Cancel</button><button class="btn primary" data-m="save">' + (isNew ? 'Create bot' : 'Save') + '</button></div>';
     const m = modal(html, { wide: true });
     const permDesc = () => { const v = m.querySelector('[name=permission]').value || S.config.defaultPermission; $('#perm-desc').textContent = (PERMS[v] || PERMS.ask)[1]; };
+    // Connector settings aren't on the live stream, so load the current ones for this bot.
+    let mcpOriginal = m.querySelector('[name=mcpServers]').value;
+    if (!isNew) {
+      api('GET', '/api/state').then((st) => {
+        const fresh = st.bots.find((x) => x.id === b.id);
+        const box = m.querySelector('[name=mcpServers]');
+        if (!fresh || !box || box.value !== mcpOriginal) return; // don't overwrite the user's typing
+        mcpOriginal = box.value = Object.keys(fresh.mcpServers || {}).length ? JSON.stringify(fresh.mcpServers, null, 2) : '';
+      }).catch(() => {});
+    }
     permDesc();
     m.querySelector('[name=permission]').addEventListener('change', permDesc);
     m.addEventListener('click', async (e) => {
@@ -1050,15 +1066,18 @@
           avatar: f('avatar').value.trim() || '🤖', name: f('name').value.trim(), title: f('title').value.trim(), color: f('color').value,
           description: f('description').value.trim(), section: f('section').value.trim(), primary: f('primary').checked, notify: f('notify').checked, hidden: f('hidden').checked,
           instructions: f('instructions').value, model: f('modelCustom').value.trim() || f('model').value, effort: f('effort').value, dailyBudgetUsd: f('dailyBudgetUsd').value,
-          cwd: f('cwd').value.trim(), permission: f('permission').value, alwaysAllow: f('alwaysAllow').value, useMyClaudeSettings: f('useMyClaudeSettings').checked, trustFolderSettings: f('trustFolderSettings').checked, mcpServers: f('mcpServers').value,
+          cwd: f('cwd').value.trim(), permission: f('permission').value, alwaysAllow: f('alwaysAllow').value, useMyClaudeSettings: f('useMyClaudeSettings').checked, trustFolderSettings: f('trustFolderSettings').checked,
         };
         if (!body.name) { toast('Give the bot a name', true); return; }
+        // Connector settings are sent only when the box was actually changed (it may be loaded late).
+        if (f('mcpServers').value !== mcpOriginal) body.mcpServers = f('mcpServers').value;
         if (body.permission === 'full' && b.permission !== 'full' && !(await confirmBox('Give ' + body.name + ' full access?', 'It will run any command and edit any file it can reach without asking you. Only do this for a bot working in a folder you can afford to lose.', 'Give full access'))) return;
         const r = await attempt(() => (isNew ? api('POST', '/api/bots', body) : api('PATCH', '/api/bots/' + b.id, body)));
         if (r) {
           closeModal();
           if (body.section && !(S.config.sections || []).includes(body.section)) api('PATCH', '/api/config', { sections: [...(S.config.sections || []), body.section] }).catch(() => {});
-          if (isNew) { upsert(S.bots, r.bot); go('dm:' + r.bot.id); }
+          upsert(S.bots, r.bot); // the response includes connector settings; the live stream doesn't
+          if (isNew) go('dm:' + r.bot.id);
         }
       }
     });
@@ -1415,8 +1434,8 @@
   // fetch everything again so links in this tab keep working.
   async function relink() {
     V.msgs = {};
-    await refreshState();
     connect();
+    await refreshState();
     if (V.pane && V.pane.startsWith('page:')) { delete $('#pane').dataset.page; }
     renderMain();
     renderPane();
@@ -1441,7 +1460,9 @@
     }
     if (!KEY) return signIn('');
     try { await refreshState(); } catch (e) { if (KEY && e.message !== 'Sign in required') document.body.innerHTML = '<div class="empty"><h3>Can\'t reach Bullpen</h3><p>' + esc(e.message) + '</p></div>'; return; }
-    setInterval(() => { api('GET', '/api/whoami').then((r) => { if (r.vt !== VT) relink(); }).catch(() => {}); }, 3600e3);
+    // Day rollover: yesterday's links stay valid for another day, so just reconnect the live stream
+    // now and pick up fresh links the next time the user switches chats.
+    setInterval(() => { api('GET', '/api/whoami').then((r) => { if (r.vt !== VT) { VT = r.vt; connect(); V.linksStale = true; } }).catch(() => {}); }, 3600e3);
     go(fromHash(), { replace: true });
     connect();
   })();

@@ -50,14 +50,33 @@ Each running bot turn adds one Claude Code process; *Bots working at once* (Sett
 
 ## Run it
 
+**Windows (no admin rights needed)**
+
+1. Download Bullpen: on GitHub, **Code → Download ZIP**, and unzip it anywhere (for example Documents). Or in a Command Prompt:
+   ```bat
+   curl -L -o bullpen.zip https://github.com/youngharold/bullpen/archive/refs/heads/main.zip && tar -xf bullpen.zip
+   ```
+2. In the `bullpen-main` folder, double-click **`start.cmd`**. If Node.js isn't installed, it offers to download the official one from nodejs.org (about 30 MB, checksum-verified, into your own user folder). Your browser opens, signed in.
+
+If Windows asks whether to run `start.cmd`, choose **Run** (or, before unzipping, right-click the ZIP → Properties → **Unblock**).
+
+**macOS and Linux**
+
 ```bash
 git clone https://github.com/youngharold/bullpen
 cd bullpen
 node server.js --open
 ```
 
-- **Windows:** double-click `start.cmd`.
-- **macOS:** double-click `start.command` (the first time, right-click → Open).
+On macOS you can double-click `start.command` instead (the first time, right-click → Open).
+
+Starting Bullpen again while it's already running just opens the running one.
+
+## Update
+
+- **Windows:** double-click **`update.cmd`**. **macOS:** double-click `update.command`. **Anywhere:** `node update.js`.
+
+It downloads the latest version (a git checkout uses `git pull` instead), stops the running Bullpen, swaps in the new files and starts it again. Bots that were in the middle of something pick up where they left off. Your bots, chats and settings live in the data folder, which an update never touches. The previous version is kept in `.update/previous` until the next update. `node update.js --check` only checks; `--no-start` updates without starting. Settings → About shows the version you have.
 
 The window shows a **sign-in link** with your access key. `--open` opens it for you, and the browser remembers the key after that. The key is also saved in `secret.json` in the data folder.
 
@@ -170,6 +189,8 @@ Only the most recent month of each chat is loaded into memory, and chats nobody 
 
 ## Troubleshooting
 
+- **"Claude Code is not signed in on this computer":** the Claude Code login expired. Open a terminal, run `claude`, type `/login` and sign in, then press **Retry** on the failed message.
+- **The update can't download at work:** it tries Node's own download first, then `curl` (which uses the Windows certificate store, as many company networks require). If both are blocked, download the ZIP in your browser and unzip it over the old folder; your data is elsewhere and stays put.
 - **"Claude Code CLI not found":** set its path in Settings → Bots & Claude, or start Bullpen with `CLAUDE_BIN` set.
 - **Bots can't reach Claude at work, but `claude` works in a terminal:** company proxy or gateway settings sometimes live outside the settings `env` block. Turn on *Use my Claude Code settings and connectors* for that bot.
 - **An older Claude Code can't connect to Bullpen's tools:** set Settings → Bots & Claude → Tool connection to *Separate helper process*.
@@ -180,7 +201,7 @@ Only the most recent month of each chat is loaded into memory, and chats nobody 
 npm test
 ```
 
-This runs about 50 tests: unit tests, storage tests, end-to-end tests and shutdown tests. They use `test/fake-claude.js`, a stand-in for the CLI that speaks its stream-json format, keeps sessions, and calls Bullpen's real MCP endpoint. That covers delegation, approvals, cards, routines, group chats and security without spending any tokens.
+This runs about 75 tests on macOS, Linux and Windows: unit tests, storage tests, end-to-end tests, shutdown tests and updater tests. They use `test/fake-claude.js`, a stand-in for the CLI that speaks its stream-json format, keeps sessions, and calls Bullpen's real MCP endpoint. That covers delegation, approvals, cards, routines, group chats and security without spending any tokens.
 
 ## License
 

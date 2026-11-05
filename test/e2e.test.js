@@ -264,6 +264,15 @@ test('failures are reported and three in a row pause the bot', async () => {
   assert.strictEqual(after.session.id, '', 'failed first turns leave no half session');
 });
 
+test('an expired Claude Code login says how to sign in again', async () => {
+  const b = (await T.api('POST', '/api/bots', { name: 'Signed Out' })).data.bot;
+  const ch = 'dm:' + b.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: 'hi\n@@fail Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth access token has expired. Re-authenticate to continue."}}' });
+  const m = await T.waitFor(async () => (await T.msgs(ch)).find((x) => x.role === 'system' && /Turn failed/.test(x.text)), 15000, 'failure message');
+  assert.match(m.text, /not signed in on this computer.*run claude, type \/login/s);
+  assert.match(m.text, /authentication_error/, 'the original error is still shown');
+});
+
 test('security: CSRF header, Host check, MCP token', async () => {
   const noHeader = await fetch(T.base + '/api/bots', { method: 'POST', headers: { 'content-type': 'application/json', ...T.auth }, body: '{"name":"x"}' });
   assert.strictEqual(noHeader.status, 403);

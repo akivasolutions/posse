@@ -32,7 +32,7 @@ let priority = null;
 try { priority = require('os').getPriority(process.pid); } catch {}
 let flagSettings = null;
 try { if (opt('--settings')) flagSettings = JSON.parse(fs.readFileSync(opt('--settings'), 'utf8')); } catch {}
-fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ argv, cwd: process.cwd(), settings: flagSettings, priority }) + '\n');
+fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ argv, cwd: process.cwd(), settings: flagSettings, priority, autoMemoryOff: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === '1' }) + '\n');
 
 const out = (ev) => process.stdout.write(JSON.stringify(ev) + '\n');
 

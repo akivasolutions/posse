@@ -126,3 +126,25 @@ test('folder routines catch up on files added while the folder was unwatched', a
   fs.rmSync(dir, { recursive: true, force: true });
   assert.ok(fired.some((p) => /arrived-while-missing\.csv/.test(p)));
 });
+
+test('folder routines still fire when checking the folder is slow (network drives)', async () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const { Scheduler } = require('../lib/scheduler');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-slow-'));
+  const fired = [];
+  const r = { id: 'rt_s', botId: 'b', enabled: true, pendingApproval: false, schedule: { type: 'folder', path: dir } };
+  const app = { routines: new Map([[r.id, r]]), runner: { running: new Map() }, bots: new Map(), fireRoutine: (rr, p) => fired.push(p), expireDeferred() {} };
+  const s = new Scheduler(app);
+  const w = { path: dir, changed: new Set(['a.csv']), during: new Set(), carry: new Set(), timer: null, fires: [], watcher: { close() {} } };
+  s.watchers.set(r.id, w);
+  const realAccess = fs.promises.access;
+  let checks = 0;
+  fs.promises.access = (p) => { checks++; return new Promise((res) => setTimeout(res, 1500)); };
+  try {
+    s.folderFire(r.id);
+    s.folderFire(r.id); // a second trigger while the first check is running starts no second check
+    await new Promise((res) => setTimeout(res, 2000));
+  } finally { fs.promises.access = realAccess; s.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+  assert.strictEqual(checks, 1, 'one check');
+  assert.strictEqual(fired.length, 1, 'fired once after the slow check');
+});

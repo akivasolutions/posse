@@ -53,6 +53,7 @@ test('a direct message gets a reply and the session persists', async () => {
   const lastCall = T.calls()[T.calls().length - 1];
   assert.ok(lastCall.settings && lastCall.settings.permissions.deny.includes('Edit(//**/.claude/**)'), 'bots can never write Claude Code settings');
   assert.ok(lastCall.settings.permissions.deny.includes('Edit(//**/.claude/settings*.json)'));
+  assert.ok(lastCall.autoMemoryOff, 'Claude Code auto-memory is off for bots (Bullpen keeps their memory)');
   assert.strictEqual(last[last.indexOf('--permission-mode') + 1], 'default');
   assert.strictEqual(last[last.indexOf('--permission-prompt-tool') + 1], 'mcp__bullpen__approval_prompt');
 });

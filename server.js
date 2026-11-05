@@ -300,7 +300,8 @@ route('GET', '/api/whoami', () => ({ ok: true, vt: viewToken() }));
 const tickets = new Map();
 route('POST', '/api/download-ticket', async (req) => {
   const b = await json(req);
-  const target = decodeURIComponent(String(b.path || '')); // compared with the decoded request path
+  let target;
+  try { target = decodeURIComponent(String(b.path || '')); } catch { throw httpError(400, 'Bad path'); } // compared with the decoded request path
   if (target !== '/api/backup' && !/^\/api\/channels\/[^/]+\/export$/.test(target)) throw httpError(400, 'Not downloadable');
   if (target !== '/api/backup') app.checkChannel(target.split('/')[3]); // 404 now, not a silently failed download
   const t = crypto.randomBytes(24).toString('base64url');

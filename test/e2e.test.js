@@ -815,3 +815,28 @@ test('approval edge cases: missing fields, big file writes, sensitive folders, d
   await T.api('DELETE', '/api/rooms/' + room.id);
   assert.strictEqual((await T.api('POST', '/api/channels/' + ach + '/cards/' + q.id, { choices: ['Yes'] })).status, 404, 'its chat is gone');
 });
+
+test('protected places: parents of sensitive folders and shell startup files', async () => {
+  const { suggestRule, setSensitive } = require('../lib/app');
+  const os = require('os');
+  const h = os.homedir();
+  setSensitive(path.join(T.tmp, 'data'));
+  assert.ok(!/\*\*/.test(suggestRule('Edit', { file_path: path.join(h, 'Library', 'foo.plist') })), '~/Library holds LaunchAgents: exact file only');
+  assert.strictEqual(suggestRule('Edit', { file_path: path.join(h, '.zshrc') }), '');
+  assert.strictEqual(suggestRule('Edit', { file_path: path.join(h, '.claude.json') }), '');
+  assert.ok(!/\*\*/.test(suggestRule('Edit', { file_path: path.join(T.tmp, 'notes.txt') })), 'a parent of the data folder gets no folder rule');
+});
+
+test('a deleted bot\'s question in a group chat is closed when answered', async () => {
+  const b = (await T.api('POST', '/api/bots', { name: 'Asker' })).data.bot;
+  const room = (await T.api('POST', '/api/rooms', { name: 'Asks', members: [b.id] })).data.room;
+  const ch = 'room:' + room.id;
+  await T.api('POST', '/api/channels/' + ch + '/messages', { text: '@asker hi\n@@as asker call ask_user {"question":"Pick?","options":["A"]}' });
+  const q = await T.waitFor(async () => (await T.msgs(ch)).find((m) => m.kind === 'card' && m.card.type === 'question'), 15000, 'question in room');
+  await idle(b.id);
+  await T.api('DELETE', '/api/bots/' + b.id);
+  const r = await T.api('POST', '/api/channels/' + ch + '/cards/' + q.id, { choices: ['A'] });
+  assert.strictEqual(r.status, 409);
+  assert.strictEqual((await T.msgs(ch)).find((m) => m.id === q.id).card.status, 'answered');
+  await T.api('DELETE', '/api/rooms/' + room.id);
+});

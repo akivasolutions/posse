@@ -191,7 +191,7 @@
 
   // ---------------- routing ----------------
   function go(ch, { replace } = {}) {
-    if (V.linksStale) { V.linksStale = false; V.msgs = {}; refreshState().then(() => { if (V.ch === ch) { renderMain(); renderPane(); } }).catch(() => {}); }
+    if (V.linksStale) { V.msgs = {}; refreshState().then(() => { V.linksStale = false; if (V.ch === ch) { renderMain(); renderPane(); } }).catch(() => {}); }
     V.ch = ch;
     const h = '#' + ch.replace(':', '/');
     if (location.hash !== h) { if (replace) history.replaceState(null, '', h); else history.pushState(null, '', h); }
@@ -218,6 +218,7 @@
   const isChat = (ch) => ch && (ch.startsWith('dm:') || ch.startsWith('room:'));
   window.addEventListener('popstate', () => {
     if (!$('#side') || /key=/.test(location.hash)) return; // sign-in screen, or a sign-in link being handled
+    if (V.linksStale) { go(fromHash(), { replace: true }); return; }
     V.ch = fromHash(); renderSide(); renderMain(); renderPane();
   });
 
@@ -496,10 +497,12 @@
       case 'approval': {
         const raw = Object.entries(c.input || {}).map(([k, v]) => k + ': ' + v).join('\n');
         // Make direction overrides and zero-width characters visible, so text can't be disguised.
-        const input = raw.replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, (ch) => '⟦U+' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') + '⟧');
+        const input = raw.replace(/[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{E0000}-\u{E007F}]/gu,
+          (ch) => '⟦U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0') + '⟧');
         const lines = raw.split('\n').length;
+        const sizeNote = c.fullSize ? c.fullSize.toLocaleString() + ' characters in all · <b>only the first part is shown</b>' : raw.length.toLocaleString() + ' characters';
         let h = '<div class="card approval"><h4>' + (c.escalation ? '🛡 ' + esc(c.tool) + '?' : '⚠️ Approve ' + esc(c.tool) + '?') + '</h4>' +
-          '<div class="k">' + lines + ' line' + (lines === 1 ? '' : 's') + ' · ' + raw.length.toLocaleString() + ' characters' + (raw.length > 600 ? ' · <button class="btn sm" data-act="expand">Show all</button>' : '') + '</div>' +
+          '<div class="k">' + lines + ' line' + (lines === 1 ? '' : 's') + ' · ' + sizeNote + (raw.length > 600 || lines > 12 ? ' · <button class="btn sm" data-act="expand">Show all</button>' : '') + '</div>' +
           (c.escalation === 'shared' ? '<div class="k">Every bot reads this, including ones with more permissions than the bot asking. Approve only if you want it saved as shown.</div>'
             : c.escalation ? '<div class="k">That bot has more permissions than the one asking. Approve only if this is exactly what you want done; everything it will receive is shown below.</div>' : '') + '<pre class="input">' + esc(input) + '</pre>';
         if (st === 'pending' || st === 'later') {
@@ -1462,7 +1465,13 @@
     try { await refreshState(); } catch (e) { if (KEY && e.message !== 'Sign in required') document.body.innerHTML = '<div class="empty"><h3>Can\'t reach Bullpen</h3><p>' + esc(e.message) + '</p></div>'; return; }
     // Day rollover: yesterday's links stay valid for another day, so just reconnect the live stream
     // now and pick up fresh links the next time the user switches chats.
-    setInterval(() => { api('GET', '/api/whoami').then((r) => { if (r.vt !== VT) { VT = r.vt; connect(); V.linksStale = true; } }).catch(() => {}); }, 3600e3);
+    setInterval(() => {
+      api('GET', '/api/whoami').then((r) => {
+        if (r.vt === VT) return;
+        if (V.linksStale) { VT = r.vt; relink(); return; } // second rollover without a refresh: links are about to expire
+        VT = r.vt; connect(); V.linksStale = true;
+      }).catch(() => {});
+    }, 3600e3);
     go(fromHash(), { replace: true });
     connect();
   })();

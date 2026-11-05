@@ -1,4 +1,6 @@
 'use strict';
+// Short folder-routine timers for tests (set before lib/scheduler is loaded; works on every OS).
+process.env.BULLPEN_FOLDER_QUIET_MS = process.env.BULLPEN_FOLDER_QUIET_MS || '300';
 const test = require('node:test');
 const assert = require('node:assert');
 const { renderMarkdown } = require('../public/md.js');
@@ -98,4 +100,25 @@ test('always-allow never covers the whole disk, a drive, or the home folder', ()
   assert.strictEqual(suggestRule('Edit', { file_path: require('path').join(os.homedir(), 'notes.md') }), 'Edit(/' + home + '/notes.md)', 'home folder: exact file only');
   assert.strictEqual(suggestRule('Read', { file_path: 'C:\\secret.txt' }), 'Read(//c/secret.txt)');
   assert.strictEqual(suggestRule('Read', { file_path: '/Users/pat/Clients/Acme/a.txt' }), 'Read(//Users/pat/Clients/Acme/**)');
+});
+
+test('folder routines catch up on files added while the folder was unwatched', async () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const { Scheduler } = require('../lib/scheduler');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-watch-'));
+  const fired = [];
+  const r = { id: 'rt_1', botId: 'b', enabled: true, pendingApproval: false, schedule: { type: 'folder', path: dir } };
+  const app = { routines: new Map([[r.id, r]]), runner: { running: new Map() }, bots: new Map(), fireRoutine: (rr, payload) => fired.push(payload), expireDeferred() {} };
+  const s = new Scheduler(app);
+  fs.rmSync(dir, { recursive: true });
+  s.syncWatchers(); // folder missing: not watched, remembered as missing
+  assert.strictEqual(s.watchers.size, 0);
+  assert.strictEqual(r.watchError, 'The folder is missing');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'arrived-while-missing.csv'), '1');
+  s.syncWatchers(); // folder back: watched again, and the new file is queued
+  assert.strictEqual(s.watchers.size, 1);
+  await new Promise((res) => setTimeout(res, Number(process.env.BULLPEN_FOLDER_QUIET_MS || 20000) + 300));
+  s.stop();
+  assert.ok(fired.some((p) => /arrived-while-missing\.csv/.test(p)));
 });

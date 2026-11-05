@@ -248,12 +248,15 @@ route('PATCH', '/api/rooms/:id', async (req, res, p) => ({ room: app.updateRoom(
 route('DELETE', '/api/rooms/:id', (req, res, p) => { app.deleteRoom(p.id); return { ok: true }; });
 
 route('GET', '/api/pending', () => ({ items: app.pendingCards().map((i) => ({ ...i, msg: deco(i.msg) })) }));
-route('GET', '/api/search', (req, res, p, url) => ({ results: app.search(url.searchParams.get('q')) }));
-route('GET', '/api/channels/:ch/export', (req, res, p) => {
-  const { title, text } = app.exportChannel(p.ch);
+route('GET', '/api/search', async (req, res, p, url) => ({ results: await app.search(url.searchParams.get('q')) }));
+route('GET', '/api/channels/:ch/export', async (req, res, p) => {
+  const c = app.checkChannel(p.ch);
+  const title = c.kind === 'dm' ? c.bot.name : c.room.name;
   const name = (title.replace(/[^\w .-]+/g, '').trim() || 'chat') + '.md';
   res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'content-disposition': 'attachment; filename*=UTF-8\'\'' + encodeURIComponent(name), 'cache-control': 'no-store', ...SEC_HEADERS });
-  res.end(text);
+  const { once } = require('events');
+  await app.exportChannel(p.ch, async (chunk) => { if (!res.write(chunk)) await once(res, 'drain'); });
+  res.end();
   return undefined;
 });
 route('POST', '/api/channels/:ch/messages/:id/retry', (req, res, p) => app.retryTurn(p.ch, p.id));
@@ -277,42 +280,18 @@ route('POST', '/api/routines/:id/run', (req, res, p) => {
 route('DELETE', '/api/pages/:id', (req, res, p) => { app.deletePage(p.id); return { ok: true }; });
 
 route('PATCH', '/api/config', async (req) => ({ config: app.updateConfig(await json(req)) }));
-// One-click backup: the data folder as .tar.gz (minus the access key, temp files and trash).
-route('GET', '/api/backup', (req, res) => {
-  const zlib = require('zlib');
-  const gz = zlib.createGzip({ level: 6 });
+// One-click backup: the data folder as .tar.gz (minus the access key, temp files and trash),
+// streamed file by file so even a large folder doesn't use much memory.
+route('GET', '/api/backup', async (req, res) => {
   const stamp = new Date().toISOString().slice(0, 10);
   res.writeHead(200, { 'content-type': 'application/gzip', 'content-disposition': 'attachment; filename="bullpen-backup-' + stamp + '.tar.gz"', 'cache-control': 'no-store', ...SEC_HEADERS });
-  gz.pipe(res);
-  const skip = new Set(['secret.json', 'run', 'trash']);
-  const pad = (n) => Buffer.alloc((512 - (n % 512)) % 512);
-  const header = (name, size, mtime) => {
-    const h = Buffer.alloc(512);
-    let prefix = '';
-    if (Buffer.byteLength(name) > 100) { const i = name.lastIndexOf('/', name.length - 1); prefix = name.slice(0, i); name = name.slice(i + 1); }
-    h.write(name, 0, 100); h.write('0000600\0', 100); h.write('0000000\0', 108); h.write('0000000\0', 116);
-    h.write(size.toString(8).padStart(11, '0') + '\0', 124); h.write(Math.floor(mtime / 1000).toString(8).padStart(11, '0') + '\0', 136);
-    h.write('        ', 148); h.write('0', 156); h.write('ustar\0' + '00', 257); h.write(prefix, 345, 155);
-    let sum = 0; for (const b of h) sum += b;
-    h.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
-    return h;
-  };
-  const walk = (dir, rel) => {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (!rel && skip.has(e.name)) continue;
-      const full = path.join(dir, e.name);
-      const r = rel ? rel + '/' + e.name : e.name;
-      if (e.isDirectory()) walk(full, r);
-      else if (e.isFile() && !e.name.endsWith('.tmp')) {
-        const data = fs.readFileSync(full);
-        gz.write(header('bullpen/' + r, data.length, fs.statSync(full).mtimeMs));
-        gz.write(data); gz.write(pad(data.length));
-      }
-    }
-  };
-  try { walk(app.store.dir, ''); } catch (e) { console.error('[bullpen] backup:', e.message); }
-  gz.end(Buffer.alloc(1024));
-  app.audit('backup', { detail: 'downloaded' });
+  try {
+    await require('./lib/backup').streamBackup(app.store.dir, res, new Set(['secret.json', 'run', 'trash']));
+    app.audit('backup', { detail: 'downloaded' });
+  } catch (e) {
+    console.error('[bullpen] backup failed:', e.message);
+    app.audit('backup', { detail: 'failed: ' + e.message });
+  }
   return undefined;
 });
 route('GET', '/api/whoami', () => ({ ok: true, vt: viewToken() }));

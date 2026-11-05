@@ -119,7 +119,9 @@ async function main() {
       const decision = JSON.parse(r.result.content[0].text);
       notes.push('perm ' + m[1] + ' -> ' + decision.behavior);
     } else if ((m = /^@@touch\s+(.+)$/.exec(line))) {
-      fs.writeFileSync(path.resolve(process.cwd(), m[1].trim()), 'written by the bot');
+      const f = path.resolve(process.cwd(), m[1].trim());
+      out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'w' + Date.now(), name: 'Write', input: { file_path: f, content: 'written by the bot' } }] } });
+      fs.writeFileSync(f, 'written by the bot');
     } else if ((m = /^@@sleep\s+(\d+)/.exec(line))) {
       await new Promise((res) => setTimeout(res, +m[1]));
     } else if ((m = /^@@fail\s*(.*)$/.exec(line))) {

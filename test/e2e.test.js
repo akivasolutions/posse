@@ -605,6 +605,26 @@ test('folder routines run when files land, and ignore the bot\'s own writes', as
   await T.api('DELETE', '/api/bots/' + bot.id);
 });
 
+test('folder routines: files someone else drops during a run trigger the next run', async () => {
+  const dir = path.join(T.tmp, 'watched2');
+  fs.mkdirSync(dir);
+  const bot = (await T.api('POST', '/api/bots', { name: 'Watcher2', cwd: dir })).data.bot;
+  const r = (await T.api('POST', '/api/routines', { botId: bot.id, title: 'Intake2', instructions: 'Handle\n@@sleep 1500\n@@touch own-output.txt\n@@reply handled', schedule: { type: 'folder', path: dir }, notify: 'always' })).data;
+  await new Promise((res) => setTimeout(res, 300));
+  fs.writeFileSync(path.join(dir, 'a.csv'), '1');
+  await T.waitFor(async () => (await T.api('GET', '/api/state')).data.bots.find((x) => x.id === bot.id).status.state === 'working', 15000, 'first run working');
+  fs.writeFileSync(path.join(dir, 'b.csv'), '2'); // dropped by the user mid-run
+  await T.waitFor(async () => (await T.api('GET', '/api/state')).data.routines.find((x) => x.id === r.id).runs.length >= 2, 20000, 'second run for b.csv');
+  const inc = (await T.msgs('dm:' + bot.id)).filter((m) => m.role === 'incoming').map((m) => m.text);
+  assert.ok(inc.some((t) => /b\.csv/.test(t)), 'b.csv reported');
+  assert.ok(!inc.some((t) => /own-output\.txt/.test(t)), 'the bot\'s own write is never reported');
+  await idle(bot.id);
+  await new Promise((res) => setTimeout(res, 2000));
+  assert.strictEqual((await T.api('GET', '/api/state')).data.routines.find((x) => x.id === r.id).runs.length, 2, 'no further self-triggered runs');
+  await T.api('DELETE', '/api/routines/' + r.id);
+  await T.api('DELETE', '/api/bots/' + bot.id);
+});
+
 test('backup downloads the data folder without the access key', async () => {
   const r = await fetch(T.base + '/api/backup', { headers: T.auth });
   assert.match(r.headers.get('content-disposition'), /bullpen-backup-.*\.tar\.gz/);

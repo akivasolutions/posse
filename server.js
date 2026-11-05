@@ -74,6 +74,29 @@ function viewOk(url) {
   const day = Math.floor(Date.now() / 86400e3);
   return !!vt && (same(vt, viewToken(day)) || same(vt, viewToken(day - 1)));
 }
+// Each page and file link carries its own token, good for that one resource only (and only for a
+// day or two). A page opened in its own tab can read its URL, so this keeps what it could leak to
+// itself.
+function resToken(kind, id, day = Math.floor(Date.now() / 86400e3)) {
+  return crypto.createHmac('sha256', secret.accessKey).update('res:' + kind + ':' + id + ':' + day).digest('base64url').slice(0, 32);
+}
+function resOk(kind, id, url) {
+  const t = url.searchParams.get('t');
+  const day = Math.floor(Date.now() / 86400e3);
+  return !!t && (same(t, resToken(kind, id, day)) || same(t, resToken(kind, id, day - 1)));
+}
+const signed = (kind, id, name) => '/' + kind + '/' + id + (name ? '/' + encodeURIComponent(name) : '') + '?t=' + resToken(kind, id);
+// Add signed links to what the browser is sent; stored messages never contain tokens.
+function deco(m) {
+  if (!m) return m;
+  let out = m;
+  if (m.kind === 'card' && m.card && (m.card.type === 'file' || m.card.type === 'page')) {
+    out = { ...m, card: { ...m.card, url: m.card.type === 'file' ? signed('files', m.card.fileId, m.card.name) : signed('pages', m.card.pageId) } };
+  }
+  if (Array.isArray(m.files) && m.files.length) out = { ...out, files: m.files.map((f) => ({ ...f, url: signed('files', f.id, f.name) })) };
+  return out;
+}
+const decoPage = (p) => ({ ...p, url: signed('pages', p.id) });
 let lastFailAudit = 0;
 function authFailed() {
   // Wrong keys are logged (at most once a minute) but never lock anyone out: the key is 144 bits.
@@ -159,7 +182,14 @@ function pageShell(title, markdown) {
 
 // ---------------- SSE ----------------
 const clients = new Set();
-app.on('ev', (ev) => { const line = 'data: ' + JSON.stringify(ev) + '\n\n'; for (const c of clients) c.write(line); });
+app.on('ev', (ev) => {
+  let out = ev;
+  if ((ev.type === 'message' || ev.type === 'message:update') && ev.msg) out = { ...ev, msg: deco(ev.msg) };
+  else if (ev.type === 'page' && ev.page) out = { ...ev, page: decoPage(ev.page) };
+  else if (ev.type === 'routines') out = { ...ev, routines: ev.routines.map(({ webhook, ...r }) => ({ ...r, webhook: webhook ? 'set' : '' })) };
+  const line = 'data: ' + JSON.stringify(out) + '\n\n';
+  for (const c of clients) c.write(line);
+});
 app.on('activity', (a) => { const line = 'data: ' + JSON.stringify({ type: 'activity', ...a }) + '\n\n'; for (const c of clients) c.write(line); });
 setInterval(() => { for (const c of clients) c.write(': ping\n\n'); }, 25e3).unref();
 
@@ -171,7 +201,7 @@ function route(method, pattern, handler, opts = {}) {
   routes.push({ method, re, keys, handler, open: !!opts.open });
 }
 
-route('GET', '/api/state', () => app.publicState());
+route('GET', '/api/state', () => { const st = app.publicState(); st.pages = st.pages.map(decoPage); return st; });
 
 route('GET', '/api/events', (req, res) => {
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
@@ -183,7 +213,8 @@ route('GET', '/api/events', (req, res) => {
 
 route('GET', '/api/channels/:ch/messages', (req, res, p, url) => {
   app.checkChannel(p.ch);
-  return app.channels.page(p.ch, { before: url.searchParams.get('before'), limit: Math.min(200, parseInt(url.searchParams.get('limit') || '80', 10) || 80) });
+  const r = app.channels.page(p.ch, { before: url.searchParams.get('before'), limit: Math.min(200, parseInt(url.searchParams.get('limit') || '80', 10) || 80) });
+  return { ...r, messages: r.messages.map(deco) };
 });
 route('POST', '/api/channels/:ch/messages', async (req, res, p) => {
   const b = await json(req);
@@ -216,7 +247,7 @@ route('POST', '/api/rooms', async (req) => ({ room: app.createRoom(await json(re
 route('PATCH', '/api/rooms/:id', async (req, res, p) => ({ room: app.updateRoom(p.id, await json(req)) }));
 route('DELETE', '/api/rooms/:id', (req, res, p) => { app.deleteRoom(p.id); return { ok: true }; });
 
-route('GET', '/api/pending', () => ({ items: app.pendingCards() }));
+route('GET', '/api/pending', () => ({ items: app.pendingCards().map((i) => ({ ...i, msg: deco(i.msg) })) }));
 route('GET', '/api/search', (req, res, p, url) => ({ results: app.search(url.searchParams.get('q')) }));
 route('GET', '/api/channels/:ch/export', (req, res, p) => {
   const { title, text } = app.exportChannel(p.ch);
@@ -381,7 +412,7 @@ async function handleMcp(req, res) {
 // ---------------- server ----------------
 const server = http.createServer((req, res) => {
   handle(req, res).catch((e) => {
-    if (!(e instanceof URIError) && !e.status) console.error('[bullpen]', req.method, req.url, e);
+    if (!(e instanceof URIError) && !e.status) console.error('[bullpen]', req.method, String(req.url).split('?')[0], e);
     if (!res.headersSent) send(res, e instanceof URIError ? 400 : e.status || 500, { error: e instanceof URIError ? 'Bad request' : e.message || 'Server error' });
     else res.end();
   });
@@ -409,12 +440,15 @@ async function handle(req, res) {
   // Who may do what:
   //  - the app's own static files (no data in them): anyone who can reach the port;
   //  - webhooks and the stdio tool helper: their own secrets;
-  //  - reading the event stream, pages, files, exports and backups: the access key or a view token;
-  //  - everything else under /api: the access key.
+  //  - the live event stream: the access key or the view token;
+  //  - one page or file: the access key or that resource's own token;
+  //  - everything else (including exports and backups): the access key.
   const isStatic = req.method === 'GET' && !pathname.startsWith('/api/') && !pathname.startsWith('/pages/') && !pathname.startsWith('/files/');
   const openRoute = req.method === 'POST' && (pathname === '/api/mcp/call' || pathname.startsWith('/api/hooks/'));
-  const viewRoute = req.method === 'GET' && (pathname === '/api/events' || pathname.startsWith('/pages/') || pathname.startsWith('/files/') || pathname === '/api/backup' || /^\/api\/channels\/[^/]+\/export$/.test(pathname));
-  if (!isStatic && !openRoute && !keyOk(req) && !(viewRoute && viewOk(url))) {
+  const eventsWithView = req.method === 'GET' && pathname === '/api/events' && viewOk(url);
+  const rm = req.method === 'GET' && /^\/(pages|files)\/([\w-]+)/.exec(pathname);
+  const resourceWithToken = rm && resOk(rm[1], rm[2], url);
+  if (!isStatic && !openRoute && !keyOk(req) && !eventsWithView && !resourceWithToken) {
     authFailed();
     if (pathname.startsWith('/api/')) return send(res, 401, { error: 'Sign in required' });
     return send(res, 401, 'Sign in required. Open Bullpen from its sign-in link.');

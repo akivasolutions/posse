@@ -71,6 +71,21 @@
   });
   const authH = () => ({ Authorization: 'Bearer ' + KEY, 'X-Bullpen': '1' });
   const vt = (url) => url + (url.includes('?') ? '&' : '?') + 'vt=' + encodeURIComponent(VT);
+  // Exports and backups need the key itself, so they are fetched (with the header) and saved from memory.
+  async function downloadAuthed(url, fallbackName) {
+    const r = await fetch(url, { headers: authH() });
+    if (!r.ok) { toast('Download failed (' + r.status + ')', true); return; }
+    const cd = r.headers.get('content-disposition') || '';
+    const m = /filename\*=UTF-8''([^;]+)|filename="([^"]+)"/.exec(cd);
+    const name = m ? decodeURIComponent(m[1] || m[2]) : fallbackName;
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
 
   function signIn(msg) {
     if (V.sse) { V.sse.close(); V.sse = null; }
@@ -438,7 +453,7 @@
     let body = '';
     if (m.kind === 'card') body = cardHTML(m);
     else body = '<div class="body md">' + md(m.text) + '</div>';
-    if (m.files && m.files.length) body += '<div class="files">' + m.files.map((f) => '<a class="chip" href="' + esc(vt('/files/' + f.id + '/' + encodeURIComponent(f.name))) + '" target="_blank">📎 ' + esc(f.name) + ' <small>' + fmtSize(f.size || 0) + '</small></a>').join('') + '</div>';
+    if (m.files && m.files.length) body += '<div class="files">' + m.files.map((f) => '<a class="chip" href="' + esc(f.url || '#') + '" target="_blank">📎 ' + esc(f.name) + ' <small>' + fmtSize(f.size || 0) + '</small></a>').join('') + '</div>';
     if (m.reactions && m.reactions.length) body += '<div class="reactions">' + m.reactions.map((r) => { const b = botById(r.botId); return '<span title="' + esc(b ? b.name : '') + '">' + esc(r.emoji) + '</span>'; }).join('') + '</div>';
     if (meta.steps && meta.steps.length) {
       body += '<details class="steps"><summary>' + meta.steps.length + ' step' + (meta.steps.length === 1 ? '' : 's') + (meta.ms ? ' · ' + Math.max(1, Math.round(meta.ms / 1000)) + 's' : '') +
@@ -488,12 +503,12 @@
       case 'page': {
         const p = S.pages.find((x) => x.id === c.pageId);
         return '<div class="card"><h4>▤ ' + esc(p ? p.title : c.title) + '</h4><div class="k">' + (p ? (c.updated ? 'Page updated' : 'Saved to your Library') : 'This page was deleted') + '</div>' +
-          (p ? '<div class="row-actions"><button class="btn sm primary" data-act="open-page" data-id="' + esc(c.pageId) + '">Open</button><a class="btn sm" target="_blank" href="' + esc(vt('/pages/' + c.pageId)) + '">New tab ↗</a></div>' : '') + '</div>';
+          (p ? '<div class="row-actions"><button class="btn sm primary" data-act="open-page" data-id="' + esc(c.pageId) + '">Open</button><a class="btn sm" target="_blank" href="' + esc(c.url || '#') + '">New tab ↗</a></div>' : '') + '</div>';
       }
       case 'file':
         return '<div class="card"><h4>📎 ' + esc(c.name) + '</h4><div class="k">' + fmtSize(c.size || 0) + (c.caption ? ' · ' + esc(c.caption) : '') + '</div>' +
-          '<div class="row-actions"><a class="btn sm primary" target="_blank" href="' + esc(vt('/files/' + c.fileId + '/' + encodeURIComponent(c.name))) + '">Open</a>' +
-          '<a class="btn sm" href="' + esc(vt('/files/' + c.fileId + '/' + encodeURIComponent(c.name) + '?download=1')) + '">Download</a></div></div>';
+          '<div class="row-actions"><a class="btn sm primary" target="_blank" href="' + esc(c.url || '#') + '">Open</a>' +
+          '<a class="btn sm" href="' + esc((c.url || '#') + '&download=1') + '">Download</a></div></div>';
       case 'task': {
         const t = taskById(c.taskId);
         if (!t) return '<div class="card task"><span>☑</span><div class="tt"><b>Task #' + esc(c.taskId) + '</b></div></div>';
@@ -720,10 +735,10 @@
     if (V.pane.startsWith('page:')) {
       const p = S.pages.find((x) => x.id === V.pane.slice(5));
       if (!p) { V.pane = null; renderPaneInner(); return; }
-      const src = vt('/pages/' + p.id + '?v=' + p.updatedAt);
+      const src = (p.url || '') + '&v=' + p.updatedAt;
       if (pane.dataset.page === src) return;
       pane.dataset.page = src;
-      pane.innerHTML = '<div class="pane-head"><b>▤ ' + esc(p.title) + '</b><a class="btn sm" target="_blank" href="' + esc(vt('/pages/' + p.id)) + '">New tab ↗</a><button class="icon-btn" data-p="close">✕</button></div>' +
+      pane.innerHTML = '<div class="pane-head"><b>▤ ' + esc(p.title) + '</b><a class="btn sm" target="_blank" href="' + esc(p.url || '#') + '">New tab ↗</a><button class="icon-btn" data-p="close">✕</button></div>' +
         '<iframe class="page-frame" sandbox="allow-scripts allow-modals allow-downloads" referrerpolicy="no-referrer" src="' + esc(src) + '"></iframe>';
       return;
     }
@@ -746,7 +761,7 @@
       (b.description ? '<p>' + esc(b.description) + '</p>' : '') + '<div class="pane-actions">' +
       '<button class="btn sm" data-p="pause">' + (b.paused ? '▶ Resume' : '⏸ Pause') + '</button>' +
       '<button class="btn sm" data-p="reset" title="Start a fresh Claude session; memory and chat stay">↺ New session</button>' +
-      '<button class="btn sm" data-p="edit">⚙ Settings</button><a class="btn sm" href="' + esc(chUrl('dm:' + b.id)) + '/export">⤓ Export chat</a></div></div>';
+      '<button class="btn sm" data-p="edit">⚙ Settings</button><button class="btn sm" data-p="export">⤓ Export chat</button></div></div>';
     h += '<div class="pane-sec"><h5>Status</h5><dl class="kv">' +
       '<dt>Now</dt><dd><span class="pill ' + esc(st.state) + '">' + esc(st.state || 'idle') + '</span> ' + esc(st.state === 'working' || st.state === 'waiting' ? st.activity || '' : '') + '</dd>' +
       '<dt>Model</dt><dd>' + esc(b.model || S.config.defaultModel + ' (default)') + (b.effort ? ' · ' + esc(b.effort) + ' effort' : '') + '</dd>' +
@@ -799,6 +814,7 @@
     else if (p === 'reset' && b) {
       if (await confirmBox('Start a fresh session for ' + b.name + '?', 'The bot keeps its memory and this chat history. Its Claude context starts over, with a recap of the recent chat on the next turn. Use this when it seems confused or its context is very large.', 'New session', false)) attempt(() => api('POST', '/api/bots/' + b.id + '/reset-session'));
     } else if (p === 'clear' && b) attempt(() => api('POST', '/api/bots/' + b.id + '/clear-queue'));
+    else if (p === 'export' && b) downloadAuthed(chUrl('dm:' + b.id) + '/export', b.name + '.md');
     else if (p === 'add-routine' && b) routineModal(null, b.id);
     else if (p === 'save-mem' && b) { const ok = await attempt(() => api('PUT', '/api/bots/' + b.id + '/memory', { text: $('#mem-text').value })); if (ok) { V.dirtyMem = null; toast('Memory saved'); } }
     else if (p === 'edit-room' && r) roomModal(r);
@@ -819,7 +835,7 @@
     if (v === 'library') {
       el.innerHTML = '<p class="lead">Reports, dashboards and trackers your bots saved. Ask any bot to "make a page" for something.</p>' +
         (S.pages.length ? '<div class="grid">' + S.pages.map((p) => { const b = botById(p.botId); return '<div class="tile" data-v="page" data-id="' + esc(p.id) + '"><b>▤ ' + esc(p.title) + '</b><small>' + esc(b ? b.name : '') + ' · ' + esc(fmtTime(p.updatedAt)) + ' · ' + esc(p.format) + '</small>' +
-          '<div style="display:flex;gap:6px;margin-top:4px"><a class="btn sm" target="_blank" href="' + esc(vt('/pages/' + p.id)) + '" data-stop="1">New tab ↗</a><button class="btn sm danger" data-v="del-page" data-id="' + esc(p.id) + '">Delete</button></div></div>'; }).join('') + '</div>'
+          '<div style="display:flex;gap:6px;margin-top:4px"><a class="btn sm" target="_blank" href="' + esc(p.url || '#') + '" data-stop="1">New tab ↗</a><button class="btn sm danger" data-v="del-page" data-id="' + esc(p.id) + '">Delete</button></div></div>'; }).join('') + '</div>'
           : '<div class="empty"><h3>No pages yet</h3><p>Try: "Make me a page that tracks my open client requests."</p></div>');
     } else if (v === 'tasks') {
       const cols = [['Waiting', ['queued']], ['Working', ['working', 'held']], ['Done', ['done']], ['Failed / cancelled', ['failed', 'cancelled']]];
@@ -1172,7 +1188,7 @@
       '</div>' +
       '<div data-pane="about" class="hidden"><p><b>Bullpen</b> — a local team of persistent AI bots, powered by the Claude Code CLI. Open source, MIT license.</p>' +
         '<dl class="kv"><dt>Data folder</dt><dd style="font:12px var(--mono)">' + esc(S.dataDir) + '</dd><dt>Today</dt><dd>' + (S.usage.today.turns || 0) + ' turns · $' + (S.usage.today.costUsd || 0).toFixed(2) + ' API-equivalent</dd></dl>' +
-        '<p><a class="btn sm" href="' + esc(vt('/api/backup')) + '">⤓ Download backup (.tar.gz)</a></p>' +
+        '<p><button class="btn sm" data-m="backup">⤓ Download backup (.tar.gz)</button></p>' +
         '<p style="color:var(--muted);font-size:12.5px">Everything (chats, memory, pages, routines) is plain files in the data folder. Back it up like any folder. Keyboard: ⌘/Ctrl+K search · ⌘/Ctrl+Shift+I details · ⌘/Ctrl+, settings.</p></div>' +
       '</div><div class="modal-foot"><span class="grow"></span><button class="btn" data-m="x">Close</button><button class="btn primary" data-m="save">Save</button></div>', { wide: true });
     let sec = null;
@@ -1207,6 +1223,7 @@
           settingsModal('security');
         }
       }
+      else if (a.dataset.m === 'backup') { a.disabled = true; a.textContent = 'Preparing…'; await downloadAuthed('/api/backup', 'bullpen-backup.tar.gz'); a.disabled = false; a.textContent = '⤓ Download backup (.tar.gz)'; }
       else if (a.dataset.m === 'signout') { try { localStorage.removeItem(KEY_STORE); } catch {} closeModal(); signIn(''); }
       else if (a.dataset.m === 'notify') { if (typeof Notification !== 'undefined') { await Notification.requestPermission(); a.textContent = Notification.permission === 'granted' ? 'Enabled ✓' : 'Blocked in browser settings'; } }
       else if (a.dataset.m === 'save') {
@@ -1341,7 +1358,14 @@
         if (V.ch === 'view:tasks') renderView();
         if (V.pane === 'info') renderPane();
         break;
-      case 'routines': S.routines = ev.routines; if (V.ch === 'view:routines') renderView(); if (V.pane === 'info') renderPane(); break;
+      case 'routines': {
+        // The live stream never carries webhook secrets; keep the URLs we already have, fetch new ones.
+        const old = new Map(S.routines.map((r) => [r.id, r]));
+        if (ev.routines.some((r) => r.webhook === 'set' && !(old.get(r.id) || {}).webhook)) { refreshState().then(() => { if (V.ch === 'view:routines') renderView(); }); break; }
+        S.routines = ev.routines.map((r) => (r.webhook === 'set' ? { ...r, webhook: old.get(r.id).webhook } : r));
+        if (V.ch === 'view:routines') renderView(); if (V.pane === 'info') renderPane();
+        break;
+      }
       case 'page': upsert(S.pages, ev.page); S.pages.sort((a, b) => b.updatedAt - a.updatedAt); if (V.ch === 'view:library') renderView(); if (V.pane === 'page:' + ev.page.id) renderPane(); break;
       case 'page:removed': S.pages = S.pages.filter((p) => p.id !== ev.id); if (V.ch === 'view:library') renderView(); if (V.pane === 'page:' + ev.id) { V.pane = null; renderPane(); } break;
       case 'skills': S.skills = ev.skills; if (V.ch === 'view:skills') renderView(); break;

@@ -362,7 +362,22 @@ test('access key: header auth, read-only view tokens, no cookies, no lockout', a
   assert.match(ev.headers.get('content-type'), /event-stream/);
   ac.abort();
   const exp = await fetch(T.base + '/api/channels/dm:' + chief.id + '/export?vt=' + vt);
-  assert.strictEqual(exp.status, 200);
+  assert.strictEqual(exp.status, 401, 'exports need the key itself');
+  const expKey = await fetch(T.base + '/api/channels/dm:' + chief.id + '/export', { headers: T.auth });
+  assert.strictEqual(expKey.status, 200);
+  // pages and files: each link carries a token for that one resource
+  const st2 = (await T.api('GET', '/api/state')).data;
+  const pg = st2.pages[0];
+  assert.match(pg.url, /^\/pages\/pg_[\w]+\?t=/);
+  assert.strictEqual((await fetch(T.base + pg.url)).status, 200, 'the page opens with its own token');
+  assert.strictEqual((await fetch(T.base + '/pages/' + pg.id + '?vt=' + vt)).status, 401, 'the view token does not open pages');
+  const tok = new URL(T.base + pg.url).searchParams.get('t');
+  const fileMsg = (await T.msgs('dm:' + chief.id)).find((m) => m.kind === 'card' && m.card.type === 'file');
+  assert.ok(fileMsg.card.url && fileMsg.card.url.includes('?t='), 'file cards come with a signed link');
+  assert.strictEqual((await fetch(T.base + fileMsg.card.url)).status, 200);
+  assert.strictEqual((await fetch(T.base + '/files/' + fileMsg.card.fileId + '/x?t=' + tok)).status, 401, 'a page token does not open a file');
+  const raw = require('fs').readFileSync(require('path').join(T.tmp, 'data', 'channels', 'dm-' + chief.id, require('fs').readdirSync(require('path').join(T.tmp, 'data', 'channels', 'dm-' + chief.id))[0]), 'utf8');
+  assert.ok(!/\?t=/.test(raw), 'tokens are never stored in chat files');
   const badVt = await fetch(T.base + '/api/events?vt=nope');
   assert.strictEqual(badVt.status, 401);
   const vtWrite = await fetch(T.base + '/api/bots?vt=' + vt, { method: 'POST', headers: { 'X-Bullpen': '1', 'content-type': 'application/json' }, body: '{"name":"x"}' });
@@ -684,4 +699,20 @@ test('send_message reports success to the sender', async () => {
   const reply = await T.waitFor(async () => (await T.msgs(ch)).reverse().find((m) => m.role === 'bot' && /send_message ->/.test(m.text || '')), 15000, 'reply');
   assert.match(reply.text, /send_message -> Sent to @analyst\./);
   await idle(chief.id);
+});
+
+test('the live event stream never carries webhook secrets', async () => {
+  const who = (await T.api('GET', '/api/whoami')).data;
+  const ac = new AbortController();
+  const res = await fetch(T.base + '/api/events?vt=' + who.vt, { signal: ac.signal });
+  const reader = res.body.getReader();
+  let text = '';
+  const w = (await T.api('POST', '/api/routines', { botId: chief.id, title: 'Secret hook', instructions: 'x', schedule: { type: 'webhook' } })).data;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 3000 && !/Secret hook/.test(text)) { const { value } = await reader.read(); text += Buffer.from(value).toString(); }
+  ac.abort();
+  assert.ok(/Secret hook/.test(text), 'routine event seen');
+  const secretPart = w.webhook.split('/').pop();
+  assert.ok(!text.includes(secretPart), 'webhook secret not in the event stream');
+  await T.api('DELETE', '/api/routines/' + w.id);
 });

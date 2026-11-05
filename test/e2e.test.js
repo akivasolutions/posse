@@ -759,7 +759,7 @@ test('approval cards show everything they approve; oversized requests are refuse
 
 test('exports keep answered cards; download tickets are single-use; connector settings stay off the event stream', async () => {
   const ch = 'dm:' + chief.id;
-  const tk = (await T.api('POST', '/api/download-ticket', { path: '/api/channels/' + ch + '/export' })).data;
+  const tk = (await T.api('POST', '/api/download-ticket', { path: '/api/channels/' + encodeURIComponent(ch) + '/export' })).data; // as the browser sends it
   const first = await fetch(T.base + tk.url);
   assert.strictEqual(first.status, 200);
   const md = await first.text();

@@ -299,12 +299,12 @@ route('GET', '/api/whoami', () => ({ ok: true, vt: viewToken() }));
 const tickets = new Map();
 route('POST', '/api/download-ticket', async (req) => {
   const b = await json(req);
-  const target = String(b.path || '');
+  const target = decodeURIComponent(String(b.path || '')); // compared with the decoded request path
   if (target !== '/api/backup' && !/^\/api\/channels\/[^/]+\/export$/.test(target)) throw httpError(400, 'Not downloadable');
   const t = crypto.randomBytes(24).toString('base64url');
   tickets.set(t, { target, exp: Date.now() + 60e3 });
   for (const [k, v] of tickets) if (v.exp < Date.now()) tickets.delete(k);
-  return { url: target + '?dl=' + t };
+  return { url: target.replace(/^(\/api\/channels\/)([^/]+)/, (m, a, ch) => a + encodeURIComponent(ch)) + '?dl=' + t };
 });
 function ticketOk(pathname, url) {
   const t = url.searchParams.get('dl');

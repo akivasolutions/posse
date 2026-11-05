@@ -148,3 +148,33 @@ test('folder routines still fire when checking the folder is slow (network drive
   assert.strictEqual(checks, 1, 'one check');
   assert.strictEqual(fired.length, 1, 'fired once after the slow check');
 });
+
+test('a slow folder check never fires for an edited routine or a file still changing', async () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const { Scheduler } = require('../lib/scheduler');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-slow2-'));
+  const fired = [];
+  const r = { id: 'rt_e', botId: 'b', enabled: true, pendingApproval: false, schedule: { type: 'folder', path: dir } };
+  const app = { routines: new Map([[r.id, r]]), runner: { running: new Map() }, bots: new Map(), fireRoutine: (rr, p) => fired.push(p), expireDeferred() {} };
+  const s = new Scheduler(app);
+  const mk = (files) => ({ path: dir, changed: new Set(files), during: new Set(), carry: new Set(), timer: null, fires: [], watcher: { close() {} } });
+  const realAccess = fs.promises.access;
+  fs.promises.access = () => new Promise((res) => setTimeout(res, 400));
+  try {
+    // edited mid-check: the old check's result is ignored
+    const w1 = mk(['old.csv']);
+    s.watchers.set(r.id, w1);
+    s.folderFire(r.id);
+    s.watchers.set(r.id, mk(['new.csv']));
+    await new Promise((res) => setTimeout(res, 600));
+    assert.strictEqual(fired.length, 0, 'no fire from a stale check');
+    // still changing when the check ends: wait for quiet
+    const w3 = mk(['copying.bin']);
+    s.watchers.set(r.id, w3);
+    s.folderFire(r.id);
+    await new Promise((res) => setTimeout(res, 250));
+    w3.lastEventAt = Date.now(); // a write arrives during the check
+    await new Promise((res) => setTimeout(res, 300));
+    assert.strictEqual(fired.length, 0, 'not reported while still changing');
+  } finally { fs.promises.access = realAccess; s.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+});

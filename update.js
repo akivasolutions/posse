@@ -34,6 +34,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readJSON = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 const hmac = (key, msg) => crypto.createHmac('sha256', key).update(msg).digest('base64url');
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+// Records written before the computer last started (a crash, then a reboot) name processes that are
+// long gone, even if their numbers now belong to something else.
+const beforeBoot = (t) => !Number.isFinite(t) || t < Date.now() - os.uptime() * 1000 - 60e3;
+// The address to reach a copy that listens on host (as recorded in server.json or configured).
+const reach = (h) => (!h || h === '0.0.0.0' || h === '::' || String(h).toLowerCase() === 'localhost' ? '127.0.0.1' : String(h));
+// server.json of a copy that may still be running (not one left behind by a crash before a reboot).
+const lastServer = (data) => { const s = readJSON(path.join(data, 'server.json')) || {}; return beforeBoot(s.startedAt) ? {} : s; };
 
 function argVal(argv, name, env) {
   const i = argv.indexOf('--' + name);
@@ -227,19 +234,18 @@ function connects(port, host) {
 }
 // Anything listening on this port on either loopback address (Posse may be on ::1 via "localhost").
 const listening = async (port) => (await connects(port, '127.0.0.1')) || (await connects(port, '::1'));
-const LOOPBACK = ['127.0.0.1', 'localhost', '::1'];
+
 
 // The Posse using this data folder, if one is running. It must prove it knows the access key,
 // and the key itself is never sent, so whatever else might be on the port learns nothing.
 async function findRunning(data, argv) {
   const key = (readJSON(path.join(data, 'secret.json')) || {}).accessKey;
   if (!key) return null;
-  const last = readJSON(path.join(data, 'server.json')) || {};
-  const host = (h) => (LOOPBACK.includes(h) ? h : '127.0.0.1');
+  const last = lastServer(data);
   const tries = [];
   const add = (port, h) => { if (Number.isInteger(port) && port > 0 && port < 65536 && !tries.some((t) => t.port === port && t.host === h)) tries.push({ port, host: h }); };
-  add(last.port, host(last.host));
-  add(parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747, host(argVal(argv, 'host', 'POSSE_HOST')));
+  add(last.port, reach(last.host)); // exactly where it said it listens (a LAN address too)
+  add(parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747, reach(argVal(argv, 'host', 'POSSE_HOST')));
   add(4747, '127.0.0.1');
   for (const t of tries) {
     const n = crypto.randomBytes(18).toString('base64url');
@@ -256,15 +262,16 @@ async function findRunning(data, argv) {
 async function stopRunning(data, argv) {
   const run = await findRunning(data, argv);
   if (!run) return false;
-  const pid = (readJSON(path.join(data, 'server.json')) || {}).pid;
-  say('Stopping the running Posse (bots that were working pick up again after the restart)…');
+  const pid = lastServer(data).pid;
+  say(run.closing ? 'Waiting for Posse to finish stopping…' : 'Stopping the running Posse (bots that were working pick up again after the restart)…');
   if (!run.closing) {
     const t = Date.now();
     const r = await request(run.port, 'POST', '/api/stop', { t, sig: hmac(run.key, 'stop:' + t), reason: 'update' }, run.host);
     if (r.status !== 200) throw new Error('Posse did not stop (HTTP ' + r.status + '). Close its window, then run the update again.');
   }
   for (let i = 0; i < 150; i++) {
-    if (!(await listening(run.port)) && !(Number.isInteger(pid) && pid !== process.pid && alive(pid))) return true;
+    const up = (await connects(run.port, run.host)) || (await listening(run.port));
+    if (!up && !(Number.isInteger(pid) && pid !== process.pid && alive(pid))) return true;
     await sleep(200);
   }
   throw new Error('Posse is still running. Close its window, then run the update again.');
@@ -274,25 +281,30 @@ async function stopRunning(data, argv) {
 // port Posse will start on (an older Posse, or one using another data folder).
 async function clearTheWay(data, argv) {
   if (await stopRunning(data, argv)) return;
-  const ports = new Set([parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747]);
-  const last = readJSON(path.join(data, 'server.json')) || {};
-  if (Number.isInteger(last.port) && Number.isInteger(last.pid) && last.pid !== process.pid && alive(last.pid)) ports.add(last.port);
-  for (const port of ports) {
-    if (await listening(port)) throw new Error('Something else is using port ' + port + '. If it is Posse, close its window, then run the update again. Nothing was changed.');
-  }
+  const busy = (port) => new Error('Something else is using port ' + port + '. If it is Posse, close its window, then run the update again. Nothing was changed.');
+  const port = parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747;
+  if (await listening(port)) throw busy(port);
+  // A copy that recorded itself in server.json, still alive, and still listening where it said.
+  const last = lastServer(data);
+  if (Number.isInteger(last.port) && Number.isInteger(last.pid) && last.pid !== process.pid && alive(last.pid) && await connects(last.port, reach(last.host))) throw busy(last.port);
 }
 
 // One update at a time in this folder. A lock left by an update that was closed is taken over.
 function lock(app) {
   const f = path.join(app, '.update.lock');
+  const mine = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
   for (let i = 0; i < 3; i++) {
     try {
-      fs.writeFileSync(f, String(process.pid), { flag: 'wx' });
-      return () => { try { if (fs.readFileSync(f, 'utf8') === String(process.pid)) fs.unlinkSync(f); } catch {} };
+      fs.writeFileSync(f, mine, { flag: 'wx' });
+      return () => { try { if (fs.readFileSync(f, 'utf8') === mine) fs.unlinkSync(f); } catch {} };
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      const pid = parseInt(fs.readFileSync(f, 'utf8'), 10);
-      if (pid && pid !== process.pid && alive(pid)) throw Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true });
+      let held = {};
+      try { const raw = fs.readFileSync(f, 'utf8'); held = /^\d+$/.test(raw.trim()) ? { pid: +raw, startedAt: Date.now() } : JSON.parse(raw); } catch {}
+      // Taken over if its process is gone, or it is from before the computer last started.
+      if (Number.isInteger(held.pid) && held.pid !== process.pid && alive(held.pid) && !beforeBoot(held.startedAt)) {
+        throw Object.assign(new Error('Another update is already running in this folder. Wait for it to finish.'), { noStart: true });
+      }
       fs.rmSync(f, { force: true });
     }
   }
@@ -332,6 +344,13 @@ const stageDir = (app) => path.join(app, '.update');
 const journalFile = (app) => path.join(app, '.update', 'journal.json');
 
 const isFile = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+// Copy to a fresh temporary name (a leftover from an interrupted run, possibly read-only, is removed).
+const copyFresh = (src, dest) => { fs.rmSync(dest, { force: true }); fs.copyFileSync(src, dest); };
+// Replace dest with src in one step. Windows refuses to replace a read-only file, so clear that first.
+function replaceFile(src, dest) {
+  if (process.platform === 'win32') { try { fs.chmodSync(dest, 0o666); } catch {} }
+  hooks.rename(src, dest);
+}
 // The name as it is on disk (macOS and Windows match names regardless of case).
 const onDisk = (dir, name) => { try { return fs.readdirSync(dir).find((n) => n.toLowerCase() === name.toLowerCase()); } catch { return undefined; } };
 
@@ -347,8 +366,8 @@ function swapAll(app, plan) {
       // Files (server.js, update.js, the launchers…) are replaced in one step, so they are never
       // missing, even if the window closes mid-update. The old one is copied to previous first.
       // (A file renamed only in case takes the two-step path below, or it would keep the old case.)
-      if (!fs.existsSync(back)) { fs.copyFileSync(cur, back + '.part'); hooks.rename(back + '.part', back); }
-      hooks.rename(staged, cur);
+      if (!fs.existsSync(back)) { copyFresh(cur, back + '.part'); hooks.rename(back + '.part', back); }
+      replaceFile(staged, cur);
       continue;
     }
     if (fs.existsSync(cur)) {
@@ -378,8 +397,8 @@ function rollBack(app, plan) {
     if (!fs.existsSync(staged) && fs.existsSync(cur)) {
       if (isFile(cur) && isFile(back)) {
         // A replaced file: keep the new one staged and put the old one back in one step.
-        fs.copyFileSync(cur, staged + '.part'); hooks.rename(staged + '.part', staged);
-        fs.copyFileSync(back, back + '.part'); hooks.rename(back + '.part', cur);
+        copyFresh(cur, staged + '.part'); hooks.rename(staged + '.part', staged);
+        copyFresh(back, back + '.part'); replaceFile(back + '.part', cur);
         continue;
       }
       hooks.rename(cur, staged);
@@ -497,10 +516,11 @@ async function main(argv) {
 
 async function run(app, data, argv) {
   const pending = readJournal(app);
-  if (pending === 'bad') clearBadJournal(app);
-  else if (pending && argv.includes('--check')) {
+  if (pending && argv.includes('--check')) {
     say('An update was interrupted. Double-click start (or run the update) to finish it.');
     return false;
+  } else if (pending === 'bad') {
+    clearBadJournal(app);
   } else if (pending) {
     await clearTheWay(data, argv);
     recover(app, pending);
@@ -541,4 +561,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { untar, cleanPaths, checkPosse, readArchive, changes, install, recover, rollBack, hooks, lock, request, findRunning, stopRunning, clearTheWay, dataDir, source };
+module.exports = { untar, cleanPaths, checkPosse, readArchive, changes, install, recover, rollBack, hooks, lock, request, listening, findRunning, stopRunning, clearTheWay, dataDir, source };

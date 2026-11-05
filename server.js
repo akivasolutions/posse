@@ -7,6 +7,12 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const { spawn } = require('child_process');
+// A half-finished update leaves a mix of two versions here (lib/ may even be missing for a moment).
+// start.cmd / start.command finish it automatically; when started directly, say how.
+if (fs.existsSync(path.join(__dirname, '.update', 'journal.json'))) {
+  console.error('\n  An update of Posse was interrupted. Finish it with: node update.js --finish --open\n  (or double-click start.cmd / start.command).\n');
+  process.exit(1);
+}
 const { App, httpError } = require('./lib/app');
 const { callTool } = require('./lib/tools');
 const pkg = require('./package.json');
@@ -18,7 +24,7 @@ function arg(name, dflt) {
 }
 
 const PORT = parseInt(arg('port', '4747'), 10);
-const HOST = arg('host', '127.0.0.1');
+const HOST = (() => { const h = arg('host', '127.0.0.1'); return h.toLowerCase() === 'localhost' ? '127.0.0.1' : h; })();
 // Default data folder is per-user (~/.posse), so other accounts on a shared machine can't read it.
 // Versions before 0.2 kept it in ./data next to server.js; keep using that one if it's there.
 function defaultData() {
@@ -49,7 +55,10 @@ function readBuild() {
   return '';
 }
 const BUILD = readBuild();
-const BASE = 'http://127.0.0.1:' + PORT;
+// The address this copy can be reached on (and that the start and update scripts probe).
+const reachHost = (h) => (!h || h === '0.0.0.0' || h === '::' ? '127.0.0.1' : h);
+const urlHost = (h) => (h.includes(':') ? '[' + h + ']' : h);
+const BASE = 'http://' + urlHost(reachHost(HOST)) + ':' + PORT;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -321,7 +330,7 @@ route('GET', '/api/ping', (req, res, p, url) => {
   const n = String(url.searchParams.get('n') || '');
   if (!/^[\w-]{16,64}$/.test(n)) throw httpError(400, 'Bad challenge');
   // While shutting down, say so: a new copy waits for this one instead of "opening" it.
-  if (closing) { send(res, 503, { posse: true, closing: true, proof: proof('ping:' + n) }); return undefined; }
+  if (closing || stopRequested) { send(res, 503, { posse: true, closing: true, proof: proof('ping:' + n) }); return undefined; }
   return { posse: true, proof: proof('ping:' + n) };
 }, { open: true });
 // The update script stops Posse with a signed request that is good for one minute, once.
@@ -337,6 +346,7 @@ route('POST', '/api/stop', async (req) => {
   usedStops.add(t);
   app.audit('stopped', { detail: b.reason === 'update' ? 'for an update' : 'on request' });
   console.log('\n  Posse is stopping' + (b.reason === 'update' ? ' for an update; it starts again in the update window.' : '.') + '\n');
+  stopRequested = true; // from now on ping answers "closing"
   setTimeout(shutdown, 50);
   return { ok: true };
 }, { open: true });
@@ -599,10 +609,10 @@ function provesKey(port, host) {
     req.on('error', () => done('no'));
   });
 }
-const loopbackHost = (h) => (['127.0.0.1', 'localhost', '::1'].includes(h) ? h : '127.0.0.1');
 async function alreadyRunning() {
   const last = app.store.readJSON('server.json', null) || {};
-  for (const [port, host] of [[last.port, loopbackHost(last.host)], [PORT, loopbackHost(HOST)]]) {
+  for (const [port, host] of [[last.port, reachHost(last.host === 'localhost' ? '127.0.0.1' : last.host)], [PORT, reachHost(HOST)]]) {
+    if (typeof host !== 'string' || !host) continue;
     if (!(Number.isInteger(port) && port > 0 && port < 65536)) continue;
     let r = await provesKey(port, host);
     // A copy that is shutting down (a restart, an update): wait for it to finish, then start.
@@ -613,15 +623,9 @@ async function alreadyRunning() {
 }
 
 (async () => {
-  // A half-finished update: the files here are a mix of two versions. start.cmd / start.command
-  // finish it automatically; when started directly, say how.
-  if (fs.existsSync(path.join(__dirname, '.update', 'journal.json'))) {
-    console.error('\n  An update of Posse was interrupted. Finish it with: node update.js --finish --open\n  (or double-click start.cmd / start.command).\n');
-    process.exit(1);
-  }
   const running = await alreadyRunning();
   if (running) {
-    const u = 'http://' + (running.host === '::1' ? '[::1]' : running.host) + ':' + running.port + '/#key=' + encodeURIComponent(secret.accessKey);
+    const u = 'http://' + urlHost(running.host) + ':' + running.port + '/#key=' + encodeURIComponent(secret.accessKey);
     console.log('\n  Posse is already running' + (process.argv.includes('--open') ? '; opened it in your browser' : '') + ':\n  ' + u + '\n');
     if (process.argv.includes('--open')) openBrowser(u);
     return;
@@ -647,9 +651,11 @@ function openBrowser(u) {
 }
 
 let closing = false;
+let stopRequested = false;
 async function shutdown() {
-  if (closing) return;
+  if (closing) { console.log('  Stopping now.'); process.exit(1); } // a second Ctrl+C
   closing = true;
+  console.log('\n  Stopping Posse (bots get a few seconds to finish)…');
   // Stop the bots first and only then let go of the port: whoever waits for the port to close
   // (the updater, a restart) can then start a new copy without two sharing the data.
   app.scheduler.stop();

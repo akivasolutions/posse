@@ -421,8 +421,12 @@ test('one update at a time; a lock left by a closed update is taken over', () =>
   // A lock from a process that no longer exists.
   fs.writeFileSync(path.join(app, '.update.lock'), '999999');
   const again = U.lock(app);
-  assert.strictEqual(fs.readFileSync(path.join(app, '.update.lock'), 'utf8'), String(process.pid));
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(app, '.update.lock'), 'utf8')).pid, process.pid);
   again();
+  // A lock whose process number is in use again, but that was written before the last reboot.
+  fs.writeFileSync(path.join(app, '.update.lock'), JSON.stringify({ pid: process.ppid, startedAt: Date.now() - (require('os').uptime() + 3600) * 1000 }));
+  const third = U.lock(app);
+  third();
   assert.ok(!fs.existsSync(path.join(app, '.update.lock')));
   unlock();
 });
@@ -441,15 +445,20 @@ test('recovery still works after the old files were put back by hand', () => {
   assert.ok(!fs.existsSync(path.join(f.app, '.update', 'journal.json')));
 });
 
-test('a Posse bound to "localhost" is found and stopped through server.json', async () => {
+for (const [label, host, want] of [['"localhost" (binds 127.0.0.1)', 'localhost', '127.0.0.1'], ['another address (::1), probed exactly where it listens', '::1', '::1']]) test('a Posse on ' + label + ' is found and stopped through server.json', async () => {
   const data = tmpDir('posse-lh-');
   const port = 40000 + Math.floor(Math.random() * 20000);
-  const c = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--host', 'localhost', '--port', String(port), '--data', data], { env: { ...process.env, CLAUDE_BIN: path.join(__dirname, 'fake-claude.js') }, stdio: 'ignore' });
+  const c = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--host', host, '--port', String(port), '--data', data], { env: { ...process.env, CLAUDE_BIN: path.join(__dirname, 'fake-claude.js') }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let log = '';
+  c.stdout.on('data', (d) => { log += d; });
+  c.stderr.on('data', (d) => { log += d; });
   const exited = new Promise((r) => c.on('exit', r));
   try {
-    for (let i = 0; i < 100 && !fs.existsSync(path.join(data, 'server.json')); i++) await new Promise((r) => setTimeout(r, 100));
+    for (let i = 0; i < 100 && !/sign in:\s+\S+/.test(log); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(log.includes('http://' + (want.includes(':') ? '[' + want + ']' : want) + ':' + port + '/#key='), 'the sign-in link points where it listens\n' + log);
+    assert.strictEqual(await U.listening(port), true, 'seen on ' + want);
     const found = await U.findRunning(data, []);
-    assert.ok(found && found.port === port && found.host === 'localhost', JSON.stringify(found));
+    assert.ok(found && found.port === port && found.host === want, JSON.stringify(found));
     assert.strictEqual(await U.stopRunning(data, []), true);
     await Promise.race([exited, new Promise((r) => setTimeout(r, 500))]);
     assert.ok(c.exitCode !== null || c.signalCode !== null);
@@ -488,4 +497,42 @@ test('a restart during shutdown waits for the old copy, and no bot outlives it',
     try { process.kill(botPid, 0); } catch { botAlive = false; }
     assert.strictEqual(botAlive, false, 'the stuck bot was killed with the old copy');
   } finally { await s.stop(); }
+});
+
+test('a read-only file in the folder does not block the update (Windows refuses to replace one)', () => {
+  const f = swapFixture();
+  fs.chmodSync(path.join(f.app, 'server.js'), 0o444);
+  // A read-only leftover from an interrupted copy, too.
+  fs.mkdirSync(path.join(f.app, '.update', 'previous'), { recursive: true });
+  U.install(f.app, f.files, f.commit);
+  assert.strictEqual(f.r('server.js'), '// new server');
+});
+
+test('starting a half-updated folder directly says how to finish, even with lib/ missing', () => {
+  const app = tmpDir('posse-half-');
+  fs.copyFileSync(path.join(ROOT, 'server.js'), path.join(app, 'server.js'));
+  fs.mkdirSync(path.join(app, '.update'), { recursive: true });
+  fs.writeFileSync(path.join(app, '.update', 'journal.json'), JSON.stringify({ tops: ['lib'], gone: [], commit: '' }));
+  const r = require('child_process').spawnSync(process.execPath, [path.join(app, 'server.js')], { encoding: 'utf8', timeout: 10000 });
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stderr, /update of Posse was interrupted.*--finish/s);
+  assert.doesNotMatch(r.stderr, /Cannot find module/);
+});
+
+test('a tool a bot started is killed with Posse, even after the bot itself exited', { skip: process.platform === 'win32' && 'needs a graceful signal' }, async () => {
+  const s = await startServer();
+  let gpid = 0;
+  try {
+    const chief = (await s.api('GET', '/api/state')).data.bots.find((b) => b.primary);
+    await s.api('POST', '/api/channels/dm:' + chief.id + '/messages', { text: 'tool\n@@grandchild\n@@sleep 30000' });
+    const pidFile = path.join(s.tmp, 'fake', 'grandchild.pid');
+    await s.waitFor(() => fs.existsSync(pidFile), 10000, 'the tool to start');
+    gpid = +fs.readFileSync(pidFile, 'utf8');
+    const exited = new Promise((r) => s.child.on('exit', r));
+    process.kill(s.pid, 'SIGINT');
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 9000))]);
+    let alive = true;
+    try { process.kill(gpid, 0); } catch { alive = false; }
+    assert.strictEqual(alive, false, 'the tool was killed with Posse');
+  } finally { try { process.kill(gpid, 'SIGKILL'); } catch {} await s.stop(); }
 });

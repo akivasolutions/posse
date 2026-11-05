@@ -13,6 +13,7 @@
 //   @@ctx <tokens>           report this context size in usage
 //   @@reply <text>           final reply text (default: "ok: <first line of input>"); {AT} becomes @
 //   @@ignore-term            keep running when asked to stop (SIGTERM), like a stuck CLI
+//   @@grandchild             start a tool process that ignores SIGTERM and holds the output open
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -123,6 +124,10 @@ async function main() {
       const f = path.resolve(process.cwd(), m[1].trim());
       out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'w' + Date.now(), name: 'Write', input: { file_path: f, content: 'written by the bot' } }] } });
       fs.writeFileSync(f, 'written by the bot');
+    } else if (/^@@grandchild\b/.test(line)) {
+      // A tool that ignores SIGTERM and keeps this process's output open after it exits.
+      const g = require('child_process').spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ['ignore', 'inherit', 'inherit'] });
+      fs.writeFileSync(path.join(dir, 'grandchild.pid'), String(g.pid));
     } else if (/^@@ignore-term\b/.test(line)) {
       process.on('SIGTERM', () => {});
     } else if ((m = /^@@sleep\s+(\d+)/.exec(line))) {

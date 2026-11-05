@@ -329,8 +329,9 @@ async function lock(app) {
     const c = net.connect(addr, () => { c.destroy(); resolve(true); });
     c.on('error', () => resolve(false));
   });
+  const taken = (e) => e.code === 'EADDRINUSE' || e.code === 'EEXIST'; // both mean "someone is there"
   try { return await hold(); } catch (e) {
-    if (e.code !== 'EADDRINUSE') return unlocked(e);
+    if (!taken(e)) return unlocked(e);
   }
   if (process.platform === 'win32' || await answers()) throw busy();
   // A socket file left by an updater that was killed. Take it over, one updater at a time: the
@@ -346,7 +347,7 @@ async function lock(app) {
   try {
     if (await answers()) throw busy();
     try { fs.unlinkSync(addr); } catch {}
-    try { return await hold(); } catch (e) { if (e.code === 'EADDRINUSE') throw busy(); return unlocked(e); }
+    try { return await hold(); } catch (e) { if (taken(e)) throw busy(); return unlocked(e); }
   } finally { try { fs.rmdirSync(gate); } catch {} }
 }
 

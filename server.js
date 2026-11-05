@@ -324,10 +324,11 @@ route('GET', '/api/ping', (req, res, p, url) => {
 }, { open: true });
 // The update script stops Posse with a signed request that is good for one minute, once.
 const usedStops = new Set();
+const STARTED_AT = Date.now(); // a stop signed before this copy started is a replay
 route('POST', '/api/stop', async (req) => {
   const b = (await json(req, 4096)) || {};
   const t = Number(b.t);
-  if (!Number.isSafeInteger(t) || Math.abs(Date.now() - t) > 60e3 || usedStops.has(t) || !same(b.sig, proof('stop:' + t))) {
+  if (!Number.isSafeInteger(t) || t < STARTED_AT || Math.abs(Date.now() - t) > 60e3 || usedStops.has(t) || !same(b.sig, proof('stop:' + t))) {
     authFailed();
     throw httpError(403, 'Refused');
   }
@@ -574,14 +575,19 @@ server.on('error', (e) => {
 function provesKey(port) {
   const n = crypto.randomBytes(18).toString('base64url');
   return new Promise((resolve) => {
-    const req = http.get({ host: '127.0.0.1', port, path: '/api/ping?n=' + n, timeout: 2000, agent: false }, (res) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/ping?n=' + n, agent: false }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { if (body.length < 4096) body += c; });
-      res.on('end', () => { try { resolve(same(JSON.parse(body).proof, proof('ping:' + n))); } catch { resolve(false); } });
+      res.on('end', () => { try { done(same(JSON.parse(body).proof, proof('ping:' + n))); } catch { done(false); } });
+      res.on('error', () => done(false));
+      res.on('close', () => done(false));
     });
-    req.on('timeout', () => req.destroy());
-    req.on('error', () => resolve(false));
+    // Settles even if whatever is on the port sends headers and then stalls.
+    const timer = setTimeout(() => { req.destroy(); done(false); }, 2000);
+    req.on('error', () => done(false));
   });
 }
 async function alreadyRunning() {
@@ -622,11 +628,13 @@ let closing = false;
 async function shutdown() {
   if (closing) return;
   closing = true;
-  try { if ((app.store.readJSON('server.json', null) || {}).pid === process.pid) fs.unlinkSync(app.store.p('server.json')); } catch {}
+  // Stop the bots first and only then let go of the port: whoever waits for the port to close
+  // (the updater, a restart) can then start a new copy without two sharing the data.
   app.scheduler.stop();
+  await app.runner.shutdown();
+  try { if ((app.store.readJSON('server.json', null) || {}).pid === process.pid) fs.unlinkSync(app.store.p('server.json')); } catch {}
   server.close();
   for (const c of clients) c.end();
-  await app.runner.shutdown();
   process.exit(0);
 }
 process.on('SIGINT', shutdown);

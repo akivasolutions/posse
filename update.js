@@ -23,7 +23,7 @@ const MAX_UNPACKED = 200 * 1024 * 1024;
 const MAX_FILES = 5000;
 // Top-level names an update never replaces or removes.
 // Compared without case: Windows and macOS treat ".Git" and ".git" as the same folder.
-const KEEP = new Set(['.git', '.update', '.posse-version', 'data', 'node', 'node_modules']);
+const KEEP = new Set(['.git', '.update', '.update.lock', '.posse-version', 'data', 'node', 'node_modules']);
 const kept = (top) => KEEP.has(String(top).toLowerCase());
 // A download must contain these to count as Posse.
 const REQUIRED = ['package.json', 'server.js', 'update.js', 'lib/app.js', 'public/index.html'];
@@ -33,6 +33,7 @@ const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readJSON = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 const hmac = (key, msg) => crypto.createHmac('sha256', key).update(msg).digest('base64url');
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 
 function argVal(argv, name, env) {
   const i = argv.indexOf('--' + name);
@@ -196,17 +197,23 @@ async function download(url) {
 
 // ---------------- the running Posse ----------------
 
+// Always settles within 3 seconds, even if whatever is on the port sends headers and then stalls.
 function request(port, method, p, body) {
   return new Promise((resolve) => {
     const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
-    const req = http.request({ host: '127.0.0.1', port, method, path: p, timeout: 3000, agent: false, headers: data ? { 'content-type': 'application/json', 'content-length': data.length } : {} }, (res) => {
+    const fail = { status: 0, json: null };
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
+    const req = http.request({ host: '127.0.0.1', port, method, path: p, agent: false, headers: data ? { 'content-type': 'application/json', 'content-length': data.length } : {} }, (res) => {
       let s = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { if (s.length < 65536) s += c; });
-      res.on('end', () => { let j = null; try { j = JSON.parse(s); } catch {} resolve({ status: res.statusCode, json: j }); });
+      res.on('end', () => { let j = null; try { j = JSON.parse(s); } catch {} done({ status: res.statusCode, json: j }); });
+      res.on('error', () => done(fail));
+      res.on('close', () => done(fail));
     });
-    req.on('timeout', () => req.destroy());
-    req.on('error', () => resolve({ status: 0, json: null }));
+    const timer = setTimeout(() => { req.destroy(); done(fail); }, 3000);
+    req.on('error', () => done(fail));
     req.end(data);
   });
 }
@@ -233,22 +240,46 @@ async function findRunning(data, argv) {
   return null;
 }
 
+// Stops this data folder's Posse and waits until its process has exited (it stops its bots before
+// letting go of the port), so two copies never share the data. Returns false if none was running.
 async function stopRunning(data, argv) {
   const run = await findRunning(data, argv);
-  if (!run) {
-    const port = parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747;
-    if (await listening(port)) say('Note: something is using port ' + port + '. If it is an older Posse, close its window before it starts again.');
-    return false;
-  }
+  if (!run) return false;
+  const pid = (readJSON(path.join(data, 'server.json')) || {}).pid;
   say('Stopping the running Posse (bots that were working pick up again after the restart)…');
   const t = Date.now();
   const r = await request(run.port, 'POST', '/api/stop', { t, sig: hmac(run.key, 'stop:' + t), reason: 'update' });
   if (r.status !== 200) throw new Error('Posse did not stop (HTTP ' + r.status + '). Close its window, then run the update again.');
   for (let i = 0; i < 150; i++) {
-    if (!(await listening(run.port))) return true;
+    if (!(await listening(run.port)) && !(Number.isInteger(pid) && pid !== process.pid && alive(pid))) return true;
     await sleep(200);
   }
   throw new Error('Posse is still running. Close its window, then run the update again.');
+}
+
+// Before changing any files: stop our Posse, and refuse if something we can't identify holds the
+// port Posse will start on (an older Posse, or one using another data folder).
+async function clearTheWay(data, argv) {
+  if (await stopRunning(data, argv)) return;
+  const port = parseInt(argVal(argv, 'port', 'POSSE_PORT'), 10) || 4747;
+  if (await listening(port)) throw new Error('Something else is using port ' + port + '. If it is Posse, close its window, then run the update again. Nothing was changed.');
+}
+
+// One update at a time in this folder. A lock left by an update that was closed is taken over.
+function lock(app) {
+  const f = path.join(app, '.update.lock');
+  for (let i = 0; i < 3; i++) {
+    try {
+      fs.writeFileSync(f, String(process.pid), { flag: 'wx' });
+      return () => { try { if (fs.readFileSync(f, 'utf8') === String(process.pid)) fs.unlinkSync(f); } catch {} };
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const pid = parseInt(fs.readFileSync(f, 'utf8'), 10);
+      if (pid && pid !== process.pid && alive(pid)) throw new Error('Another update is already running in this folder. Wait for it to finish.');
+      fs.rmSync(f, { force: true });
+    }
+  }
+  throw new Error('Could not start the update (lock file).');
 }
 
 // ---------------- installing ----------------
@@ -271,20 +302,82 @@ function changes(app, files) {
   });
   const tops = [...new Set(files.map((f) => f.rel.split('/')[0]))].filter((t) => !kept(t));
   const before = (readJSON(path.join(app, '.posse-version')) || {}).top;
-  const gone = (Array.isArray(before) ? before : []).filter((t) => typeof t === 'string' && !tops.includes(t) && !kept(t) && !t.includes('/') && !t.includes('\\') && t !== '..' && t !== '.' && fs.existsSync(path.join(app, t)));
+  const shipped = new Set(tops.map((t) => t.toLowerCase())); // a case-only rename is not a removal
+  const gone = (Array.isArray(before) ? before : []).filter((t) => typeof t === 'string' && !shipped.has(t.toLowerCase()) && !kept(t) && !t.includes('/') && !t.includes('\\') && t !== '..' && t !== '.' && fs.existsSync(path.join(app, t)));
   return { changed, tops, gone };
 }
 
-// Stage the new version next to the old one, then swap each top-level entry with a rename.
-// If any swap fails, the ones already done are put back. The old version is kept in
-// .update/previous until the next update.
+// The swap. Every step can be repeated after an interruption: an entry still in .update/new
+// hasn't been placed yet (if the old one is still in place, it moves to .update/previous first).
+// update.js goes last, so an interrupted update can always be finished by running it again.
+const hooks = { rename: renameRetry }; // tests replace this to simulate a locked file
+const stageDir = (app) => path.join(app, '.update');
+const journalFile = (app) => path.join(app, '.update', 'journal.json');
+
+function swapAll(app, plan) {
+  const NEW = path.join(stageDir(app), 'new');
+  const PREV = path.join(stageDir(app), 'previous');
+  for (const t of plan.tops) {
+    const staged = path.join(NEW, t);
+    if (!fs.existsSync(staged)) continue; // already placed
+    const cur = path.join(app, t);
+    if (fs.existsSync(cur)) hooks.rename(cur, path.join(PREV, t));
+    hooks.rename(staged, cur);
+  }
+  for (const t of plan.gone) {
+    const cur = path.join(app, t);
+    if (fs.existsSync(cur) && !fs.existsSync(path.join(PREV, t))) hooks.rename(cur, path.join(PREV, t));
+  }
+}
+
+// Undo a partial swap: placed entries go back to .update/new, old ones come back from previous.
+function rollBack(app, plan) {
+  const NEW = path.join(stageDir(app), 'new');
+  const PREV = path.join(stageDir(app), 'previous');
+  for (const t of [...plan.gone].reverse()) {
+    if (fs.existsSync(path.join(PREV, t)) && !fs.existsSync(path.join(app, t))) hooks.rename(path.join(PREV, t), path.join(app, t));
+  }
+  for (const t of [...plan.tops].reverse()) {
+    const cur = path.join(app, t);
+    if (!fs.existsSync(path.join(NEW, t)) && fs.existsSync(cur)) hooks.rename(cur, path.join(NEW, t));
+    if (!fs.existsSync(cur) && fs.existsSync(path.join(PREV, t))) hooks.rename(path.join(PREV, t), cur);
+  }
+}
+
+function finishSwap(app, plan) {
+  fs.writeFileSync(path.join(app, '.posse-version'), JSON.stringify({ commit: plan.commit || '', top: plan.tops, updatedAt: new Date().toISOString() }, null, 2) + '\n');
+  fs.rmSync(path.join(stageDir(app), 'new'), { recursive: true, force: true });
+  fs.rmSync(journalFile(app), { force: true });
+}
+
+const which = (e) => (e.path ? path.basename(e.path) : 'a file') + ' (' + (e.code || e.message) + ')';
+
+// An update that was interrupted (window closed, power cut, a file locked) is finished here.
+function recover(app) {
+  const plan = readJSON(journalFile(app));
+  if (!plan) return false;
+  if (!Array.isArray(plan.tops) || !Array.isArray(plan.gone) || [...plan.tops, ...plan.gone].some((t) => typeof t !== 'string' || !t || t.includes('/') || t.includes('\\') || t === '.' || t === '..' || kept(t))) {
+    fs.rmSync(journalFile(app), { force: true });
+    return false;
+  }
+  say('Finishing an update that was interrupted…');
+  try { swapAll(app, plan); } catch (e) {
+    throw new Error('Could not finish the interrupted update: ' + which(e) + '. Close any program using the Posse folder, then run the update again.');
+  }
+  finishSwap(app, plan);
+  say('Done.');
+  return true;
+}
+
+// Stage the new version next to the old one, write the journal, then swap. If a swap fails, the
+// steps already done are undone; if even that fails, the journal stays and the next start or
+// update finishes the job.
 function install(app, files, commit) {
-  const stage = path.join(app, '.update');
+  const stage = stageDir(app);
   const NEW = path.join(stage, 'new');
-  const PREV = path.join(stage, 'previous');
   fs.rmSync(stage, { recursive: true, force: true });
   fs.mkdirSync(NEW, { recursive: true });
-  fs.mkdirSync(PREV, { recursive: true });
+  fs.mkdirSync(path.join(stage, 'previous'), { recursive: true });
   for (const f of files) {
     if (kept(f.rel.split('/')[0])) continue;
     const dest = path.join(NEW, ...f.rel.split('/'));
@@ -293,24 +386,16 @@ function install(app, files, commit) {
     if (process.platform !== 'win32') fs.chmodSync(dest, f.mode & 0o111 ? 0o755 : 0o644);
   }
   const { tops, gone } = changes(app, files);
-  const done = [];
-  try {
-    for (const t of [...tops, ...gone]) {
-      const cur = path.join(app, t);
-      if (fs.existsSync(cur)) { renameRetry(cur, path.join(PREV, t)); done.push(['moved', t]); }
-      if (tops.includes(t)) { renameRetry(path.join(NEW, t), cur); done.push(['placed', t]); }
+  const plan = { tops: [...tops.filter((t) => t !== 'update.js'), ...tops.filter((t) => t === 'update.js')], gone, commit: commit || '' };
+  fs.writeFileSync(journalFile(app), JSON.stringify(plan));
+  try { swapAll(app, plan); } catch (e) {
+    try { rollBack(app, plan); } catch (e2) {
+      throw new Error('Could not replace ' + which(e) + ', and could not put the old files back: ' + which(e2) + '. Close any program using the Posse folder, then run the update again; it finishes the update.');
     }
-  } catch (e) {
-    for (const [what, t] of done.reverse()) {
-      try {
-        if (what === 'placed') renameRetry(path.join(app, t), path.join(NEW, t));
-        else renameRetry(path.join(PREV, t), path.join(app, t));
-      } catch {}
-    }
-    throw new Error('Could not replace ' + (e.path ? path.basename(e.path) : 'a file') + ' (' + e.code + '). Nothing was changed. Close any program using the Posse folder and try again.');
+    fs.rmSync(journalFile(app), { force: true });
+    throw new Error('Could not replace ' + which(e) + '. Nothing was changed. Close any program using the Posse folder and try again.');
   }
-  fs.writeFileSync(path.join(app, '.posse-version'), JSON.stringify({ commit: commit || '', top: tops, updatedAt: new Date().toISOString() }, null, 2) + '\n');
-  fs.rmSync(NEW, { recursive: true, force: true });
+  finishSwap(app, plan);
 }
 
 // ---------------- git checkouts ----------------
@@ -333,7 +418,7 @@ async function updateGit(app, argv, data) {
   const behind = parseInt(git('rev-list', '--count', 'HEAD..@{u}'), 10) || 0;
   if (!behind) { say('Posse is up to date (' + head.slice(0, 7) + ').'); return false; }
   if (argv.includes('--check')) { say('An update is available (' + behind + ' new change' + (behind === 1 ? '' : 's') + ').'); return false; }
-  await stopRunning(data, argv);
+  await clearTheWay(data, argv);
   try { git('merge', '--ff-only', '--quiet', '@{u}'); } catch (e) {
     throw new Error('git could not update this folder (local changes?): ' + String(e.stderr || e.message).trim().split('\n').pop() + ' Posse was not changed.');
   }
@@ -347,6 +432,16 @@ async function main(argv) {
   const app = __dirname;
   const data = dataDir(app, argv);
   console.log('\n  Posse update');
+  const unlock = lock(app);
+  try { return await run(app, data, argv); } finally { unlock(); }
+}
+
+async function run(app, data, argv) {
+  if (fs.existsSync(journalFile(app))) {
+    await clearTheWay(data, argv);
+    recover(app);
+  }
+  if (argv.includes('--finish')) return !argv.includes('--no-start'); // start.cmd after an interrupted update
   if (isGitCheckout(app)) {
     await updateGit(app, argv, data);
   } else {
@@ -359,7 +454,7 @@ async function main(argv) {
     } else if (argv.includes('--check')) {
       say('An update is available (' + pkg.version + (commit ? ', ' + commit.slice(0, 7) : '') + ', ' + changed.length + ' changed file' + (changed.length === 1 ? '' : 's') + ').');
     } else {
-      await stopRunning(data, argv);
+      await clearTheWay(data, argv);
       install(app, files, commit);
       say('Updated to ' + pkg.version + (commit ? ' (' + commit.slice(0, 7) + ')' : '') + ': ' + changed.length + ' file' + (changed.length === 1 ? '' : 's') + ' changed. Your data was not touched.');
     }
@@ -375,9 +470,10 @@ if (require.main === module) {
   }, (e) => {
     console.error('\n  Update failed: ' + e.message + '\n');
     if (process.argv.includes('--check') || process.argv.includes('--no-start')) process.exit(1);
+    if (fs.existsSync(journalFile(__dirname)) || !fs.existsSync(path.join(__dirname, 'server.js'))) process.exit(1); // half-updated: don't start
     console.error('  Starting the version you already have.\n');
     require(path.join(__dirname, 'server.js'));
   });
 }
 
-module.exports = { untar, cleanPaths, checkPosse, readArchive, changes, install, findRunning, stopRunning, dataDir, source };
+module.exports = { untar, cleanPaths, checkPosse, readArchive, changes, install, recover, rollBack, hooks, lock, request, findRunning, stopRunning, clearTheWay, dataDir, source };

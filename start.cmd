@@ -5,12 +5,16 @@ REM no admin rights needed). update.cmd runs this with --update.
 setlocal
 cd /d "%~dp0"
 set "SCRIPT=server.js"
+set "EXTRA="
 if /i "%~1"=="--update" set "SCRIPT=update.js"
+REM An update that was interrupted is finished before starting.
+if not "%SCRIPT%"=="update.js" if exist "%~dp0.update\journal.json" set "EXTRA=--finish"
+if defined EXTRA set "SCRIPT=update.js"
 call :findnode
 if not defined NODE call :getnode
 if not defined NODE goto :nonode
 REM Keep this on one line: Windows has then read all of it before an update replaces this file.
-"%NODE%" "%~dp0%SCRIPT%" --open & echo. & pause & exit /b
+"%NODE%" "%~dp0%SCRIPT%" %EXTRA% --open & echo. & pause & exit /b
 
 :nonode
 echo.
@@ -38,9 +42,11 @@ echo   It can download the official Node.js from nodejs.org (about 30 MB) into
 echo   %NB%\node, just for your account. No admin rights needed.
 echo.
 set "ANS="
-set /p "ANS=  Download it now? [Y/n] "
-if /i "%ANS%"=="n" exit /b
-if /i "%ANS%"=="no" exit /b
+set /p "ANS=  Type Y and press Enter to download it (anything else cancels): "
+if not defined ANS exit /b
+set "ANS=%ANS:"=%"
+if not defined ANS exit /b
+if /i not "%ANS:~0,1%"=="y" exit /b
 set "TMPD=%NB%\download"
 set "ARCH=x64"
 if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=arm64"

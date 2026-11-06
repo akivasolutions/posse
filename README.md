@@ -54,7 +54,7 @@ Each running bot turn adds one Claude Code process; *Bots working at once* (Sett
 
 1. Download Posse: on GitHub, **Code → Download ZIP**, and unzip it anywhere (for example Documents). Or in a Command Prompt:
    ```bat
-   curl -L -o posse.zip https://github.com/youngharold/posse/archive/refs/heads/main.zip && tar -xf posse.zip
+   curl -L -o posse.zip https://github.com/akivasolutions/posse/archive/refs/heads/main.zip && tar -xf posse.zip
    ```
 2. In the `posse-main` folder, double-click **`start.cmd`**. If Node.js isn't installed, it offers to download the official one from nodejs.org (about 30 MB, checksum-verified, into your own user folder). Your browser opens, signed in.
 
@@ -63,7 +63,7 @@ If Windows asks whether to run `start.cmd`, choose **Run** (or, before unzipping
 **macOS and Linux**
 
 ```bash
-git clone https://github.com/youngharold/posse
+git clone https://github.com/akivasolutions/posse
 cd posse
 node server.js --open
 ```
